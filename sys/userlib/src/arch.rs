@@ -21,7 +21,6 @@ cfg_if::cfg_if! {
 
     if #[cfg(not(target_pointer_width = "32"))] {
         compile_error!("non-32-bit targets not supported (even for simulation)");
-    // TODO: consider using cfg_match! when stabilized for cleaner pattern matching
     } else if #[cfg(target_arch = "arm")] {
         #[macro_use]
         pub mod arm_m;
