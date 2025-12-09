@@ -59,11 +59,7 @@ macro_rules! uassert_eq {
     };
 }
 
-/// On RISC-V we use a global to record the task table position and extent.
-#[no_mangle]
-static mut TASK_TABLE_BASE: Option<NonNull<task::Task>> = None;
-#[no_mangle]
-static mut TASK_TABLE_SIZE: usize = 0;
+// Task table access is handled via crate::startup::with_task_table
 
 /// On RISC-V we use a global to record the interrupt table position and extent.
 #[no_mangle]
@@ -220,29 +216,11 @@ impl task::ArchState for SavedState {
     }
 }
 
-/// Records `tasks` as the system-wide task table.
-///
-/// # Safety
-///
-/// This stashes a copy of `tasks` without revoking your right to access it,
-/// which is a potential aliasing violation if you call `with_task_table`. So
-/// don't do that. The normal kernel entry sequences avoid this issue.
-pub unsafe fn set_task_table(tasks: &mut [task::Task]) {
-    unsafe {
-        let prev_task_table = core::mem::replace(
-            &mut TASK_TABLE_BASE,
-            Some(NonNull::from(&mut tasks[0])),
-        );
-        uassert_eq!(prev_task_table, None);
-        TASK_TABLE_SIZE = tasks.len();
-    }
-}
-
 /// Records `irqs` as the system-wide interrupt table.
 ///
 /// # Safety
 ///
-/// Same aliasing concerns as `set_task_table`.
+/// This stashes a pointer to `irqs` which could alias other references.
 pub unsafe fn set_irq_table(irqs: &[abi::Interrupt]) {
     unsafe {
         let prev_table = core::mem::replace(
@@ -268,73 +246,67 @@ pub fn reinitialize(task: &mut task::Task) {
 }
 
 /// Apply memory protection settings for a task using PMP.
-#[allow(unused_variables)]
 pub fn apply_memory_protection(task: &task::Task) {
+    let regions = task.region_table();
+
+    // Clear all PMP entries first by setting A=OFF (0) for all configs
+    // pmpcfg0 controls pmp0-3, pmpcfg1 controls pmp4-7
+    unsafe {
+        register::pmpcfg0::write(0);
+        register::pmpcfg1::write(0);
+    }
+
+    // Build the combined pmpcfg values
+    let mut pmpcfg0_val: usize = 0;
+    let mut pmpcfg1_val: usize = 0;
+
     // Safety: PMP register access is inherently unsafe as it controls memory
     // protection. We trust that the task's region table contains valid entries.
     unsafe {
-        for (i, region) in task.region_table().iter().enumerate() {
+        for (i, region) in regions.iter().enumerate().take(8) {
             let pmpaddr = region.arch_data.pmpaddr as usize;
             let pmpcfg = region.arch_data.pmpcfg as usize;
 
             match i {
                 0 => {
                     register::pmpaddr0::write(pmpaddr);
-                    register::pmpcfg0::write(
-                        register::pmpcfg0::read().bits & 0xFFFF_FF00 | pmpcfg,
-                    );
+                    pmpcfg0_val |= pmpcfg;
                 }
                 1 => {
                     register::pmpaddr1::write(pmpaddr);
-                    register::pmpcfg0::write(
-                        register::pmpcfg0::read().bits & 0xFFFF_00FF
-                            | (pmpcfg << 8),
-                    );
+                    pmpcfg0_val |= pmpcfg << 8;
                 }
                 2 => {
                     register::pmpaddr2::write(pmpaddr);
-                    register::pmpcfg0::write(
-                        register::pmpcfg0::read().bits & 0xFF00_FFFF
-                            | (pmpcfg << 16),
-                    );
+                    pmpcfg0_val |= pmpcfg << 16;
                 }
                 3 => {
                     register::pmpaddr3::write(pmpaddr);
-                    register::pmpcfg0::write(
-                        register::pmpcfg0::read().bits & 0x00FF_FFFF
-                            | (pmpcfg << 24),
-                    );
+                    pmpcfg0_val |= pmpcfg << 24;
                 }
                 4 => {
                     register::pmpaddr4::write(pmpaddr);
-                    register::pmpcfg1::write(
-                        register::pmpcfg1::read().bits & 0xFFFF_FF00 | pmpcfg,
-                    );
+                    pmpcfg1_val |= pmpcfg;
                 }
                 5 => {
                     register::pmpaddr5::write(pmpaddr);
-                    register::pmpcfg1::write(
-                        register::pmpcfg1::read().bits & 0xFFFF_00FF
-                            | (pmpcfg << 8),
-                    );
+                    pmpcfg1_val |= pmpcfg << 8;
                 }
                 6 => {
                     register::pmpaddr6::write(pmpaddr);
-                    register::pmpcfg1::write(
-                        register::pmpcfg1::read().bits & 0xFF00_FFFF
-                            | (pmpcfg << 16),
-                    );
+                    pmpcfg1_val |= pmpcfg << 16;
                 }
                 7 => {
                     register::pmpaddr7::write(pmpaddr);
-                    register::pmpcfg1::write(
-                        register::pmpcfg1::read().bits & 0x00FF_FFFF
-                            | (pmpcfg << 24),
-                    );
+                    pmpcfg1_val |= pmpcfg << 24;
                 }
                 _ => {}
             };
         }
+
+        // Write the combined config values
+        register::pmpcfg0::write(pmpcfg0_val);
+        register::pmpcfg1::write(pmpcfg1_val);
     }
 }
 
@@ -504,8 +476,8 @@ fn trap_handler(task: &mut task::Task) {
             handle_fault(task, FaultInfo::IllegalText);
         },
         _ => {
-            // Unknown trap - log and continue
-            // klog!("Unimplemented cause 0b{:b}", register::mcause::read().bits());
+            // Unknown/unhandled trap
+            // TODO: Consider logging via klog! when debugging
         }
     }
 }
@@ -549,18 +521,19 @@ fn safe_timer_handler(ticks: &mut u64, tasks: &mut [task::Task]) {
     let switch = task::process_timers(tasks, now);
 
     if switch != task::NextTask::Same {
-        unsafe {
-            with_task_table(|tasks| {
-                let current = CURRENT_TASK_PTR
-                    .expect("irq before kernel started?")
-                    .as_ptr();
-                let idx = (current as usize - tasks.as_ptr() as usize)
-                    / core::mem::size_of::<task::Task>();
+        // Need to get the current task index and pick a new task
+        let current = unsafe {
+            CURRENT_TASK_PTR
+                .expect("irq before kernel started?")
+                .as_ptr()
+        };
+        let idx = (current as usize - tasks.as_ptr() as usize)
+            / core::mem::size_of::<task::Task>();
 
-                let next = task::select(idx, tasks);
-                apply_memory_protection(next);
-                set_current_task(next);
-            });
+        let next = task::select(idx, tasks);
+        apply_memory_protection(next);
+        unsafe {
+            set_current_task(next);
         }
     }
 
@@ -572,6 +545,20 @@ fn safe_timer_handler(ticks: &mut u64, tasks: &mut [task::Task]) {
 #[allow(unused_variables)]
 pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
     klog!("start_first_task: tick_divisor={}", tick_divisor);
+
+    // Set up trap vector - this is required for syscalls and interrupts to work!
+    // Our trap handler is _start_trap, defined with link_section ".trap.rust"
+    // The address must be 4-byte aligned. Direct mode means all traps go to this address.
+    extern "C" {
+        fn _start_trap();
+    }
+    let trap_addr = _start_trap as usize;
+    klog!("  mtvec={:#x}", trap_addr);
+    unsafe {
+        // mtvec format: address[31:2] | mode[1:0]
+        // mode 0 = Direct (all traps go to BASE)
+        core::arch::asm!("csrw mtvec, {}", in(reg) trap_addr);
+    }
 
     // Configure MPP to switch us to User mode on exit from Machine mode.
     unsafe {
@@ -609,22 +596,8 @@ pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
     }
 }
 
-/// Manufacture a mutable/exclusive reference to the task table from thin air.
-///
-/// # Safety
-///
-/// Use at kernel entry points only.
-pub unsafe fn with_task_table<R>(
-    body: impl FnOnce(&mut [task::Task]) -> R,
-) -> R {
-    unsafe {
-        let tasks = core::slice::from_raw_parts_mut(
-            TASK_TABLE_BASE.expect("kernel not started").as_mut(),
-            TASK_TABLE_SIZE,
-        );
-        body(tasks)
-    }
-}
+// Use the shared task table access from startup.rs
+use crate::startup::with_task_table;
 
 /// Manufacture a shared reference to the interrupt action table from thin air.
 pub fn with_irq_table<R>(body: impl FnOnce(&[abi::Interrupt]) -> R) -> R {
