@@ -30,7 +30,10 @@ use riscv::interrupt::{Exception, Interrupt, Trap};
 use riscv::register;
 use riscv::register::mstatus::MPP;
 
+mod irq;
 mod timer;
+
+use irq::{InterruptController, IRQ};
 use timer::SysTimer;
 
 // Kernel logging - enabled via "klog-semihosting" feature
@@ -626,31 +629,54 @@ pub fn now() -> Timestamp {
     Timestamp::from(unsafe { TICKS })
 }
 
-/// Disable an IRQ. (Stub - external IRQs not yet implemented)
-#[allow(unused_variables)]
+/// Disable an external IRQ.
 pub fn disable_irq(n: u32, also_clear_pending: bool) -> Result<(), UsageError> {
-    // TODO: implement IRQ control for RISC-V
-    Err(UsageError::NoIrq)
+    IRQ.disable(n)?;
+    if also_clear_pending {
+        IRQ.clear_pending(n)?;
+    }
+    Ok(())
 }
 
-/// Enable an IRQ. (Stub - external IRQs not yet implemented)
-#[allow(unused_variables)]
+/// Enable an external IRQ.
 pub fn enable_irq(n: u32, also_clear_pending: bool) -> Result<(), UsageError> {
-    // TODO: implement IRQ control for RISC-V
-    Err(UsageError::NoIrq)
+    if also_clear_pending {
+        IRQ.clear_pending(n)?;
+    }
+    IRQ.enable(n)
 }
 
-/// Get IRQ status. (Stub - external IRQs not yet implemented)
-#[allow(unused_variables)]
+/// Get IRQ status.
 pub fn irq_status(n: u32) -> Result<abi::IrqStatus, UsageError> {
-    // TODO: implement IRQ status for RISC-V
-    Err(UsageError::NoIrq)
+    let mut status = abi::IrqStatus::empty();
+
+    if IRQ.is_enabled(n)? {
+        status |= abi::IrqStatus::ENABLED;
+    }
+    if IRQ.is_pending(n)? {
+        status |= abi::IrqStatus::PENDING;
+    }
+
+    Ok(status)
 }
 
-/// Trigger a software IRQ. (Stub - not yet implemented)
+/// Trigger a software IRQ.
+///
+/// The PLIC (and most RISC-V interrupt controllers) doesn't support
+/// software-triggered external interrupts. Unlike ARM's NVIC which has a
+/// Set Pending Register (ISPR) to pend any interrupt from software, the PLIC
+/// is a pure hardware interrupt controller with no software trigger mechanism.
+///
+/// This function is only used by `kipc::software_irq`, which is called by the
+/// test runner to simulate hardware interrupts for testing. Core Hubris
+/// functionality (task restart, fault handling, etc.) does not depend on this.
+///
+/// Options for future implementation:
+/// - Some SoCs may have platform-specific interrupt trigger mechanisms
+/// - Xh3irq (RP2350) or ESP32-C3 may have different capabilities
+/// - Could bypass interrupt path and directly set task notification bits
 #[allow(unused_variables)]
 pub fn pend_software_irq(InterruptNum(n): InterruptNum) -> Result<(), UsageError> {
-    // TODO: implement software IRQ triggering for RISC-V
     Err(UsageError::NoIrq)
 }
 
