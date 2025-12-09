@@ -544,6 +544,21 @@ fn handle_external_interrupt() {
 
 #[no_mangle]
 unsafe fn handle_fault(task: *mut task::Task, fault: FaultInfo) {
+    // Check if this fault originated from Machine mode (kernel) vs User mode (task)
+    // mstatus.MPP tells us the privilege level we trapped from
+    let mstatus = register::mstatus::read();
+    if mstatus.mpp() == MPP::Machine {
+        // Kernel fault - panic with diagnostic info for post-mortem debugging
+        let mcause = register::mcause::read().bits();
+        let mepc = register::mepc::read();
+        let mtval = register::mtval::read();
+        panic!(
+            "Kernel fault: mcause={:#010x}, mepc={:#010x}, mtval={:#010x}, mstatus={:#010x}",
+            mcause, mepc, mtval, mstatus.bits()
+        );
+    }
+
+    // Task fault - route to supervisor
     unsafe {
         with_task_table(|tasks| {
             let idx = (task as usize - tasks.as_ptr() as usize)
@@ -605,6 +620,9 @@ fn safe_timer_handler(ticks: &mut u64, tasks: &mut [task::Task]) {
 #[allow(unused_variables)]
 pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
     klog!("start_first_task: tick_divisor={}", tick_divisor);
+
+    // Test panic for epitaph debugging - uncomment to test
+    // panic!("TEST PANIC: epitaph test from start_first_task");
 
     // Set up trap vector - this is required for syscalls and interrupts to work!
     // Our trap handler is _start_trap, defined with link_section ".trap.rust"
