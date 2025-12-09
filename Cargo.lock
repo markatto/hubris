@@ -3403,8 +3403,8 @@ dependencies = [
 
 [[package]]
 name = "hubtools"
-version = "0.4.6"
-source = "git+https://github.com/oxidecomputer/hubtools#cec2560e9a0126e9e687d51b385a57891abc87c3"
+version = "0.4.7"
+source = "git+https://github.com/markatto/hubtools.git#a1d252f0f1cabeddf2cd3cdd24a08d8f07e9fc0d"
 dependencies = [
  "digest",
  "hex",

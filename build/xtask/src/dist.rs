@@ -117,6 +117,14 @@ impl Arch {
         }
     }
 
+    /// Convert to hubtools ElfMachine type
+    pub fn to_hubtools_machine(&self) -> hubtools::ElfMachine {
+        match self {
+            Arch::Arm => hubtools::ElfMachine::Arm,
+            Arch::RiscV => hubtools::ElfMachine::RiscV,
+        }
+    }
+
     /// Check if an ELF machine type is supported by any architecture
     pub fn is_supported_machine(machine: u16) -> bool {
         machine == goblin::elf::header::EM_ARM
@@ -730,6 +738,7 @@ pub fn package(
             &raw_output_sections,
             kentry,
             0xFF,
+            cfg.arch.to_hubtools_machine(),
         )
         .context("constructing image from segments with hubtools")?;
 
