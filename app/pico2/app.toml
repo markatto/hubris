@@ -1,0 +1,23 @@
+name = "pico2"
+target = "riscv32imac-unknown-none-elf"
+board = "pico2"
+chip = "../../chips/rp2350"
+stacksize = 1024
+
+[kernel]
+name = "pico2"
+requires = {flash = 32768, ram = 8192}
+
+[tasks.jefe]
+name = "task-jefe"
+priority = 0
+max-sizes = {flash = 16384, ram = 4096}
+start = true
+stacksize = 1536
+
+[tasks.idle]
+name = "task-idle"
+priority = 5
+max-sizes = {flash = 256, ram = 256}
+stacksize = 256
+start = true
