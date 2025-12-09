@@ -117,6 +117,7 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
         KERNEL_HAS_FAILED = true;
     }
     loop {
-        cortex_m::asm::nop();
+        // Platform-independent NOP
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     }
 }
