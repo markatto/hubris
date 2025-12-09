@@ -1,0 +1,16 @@
+# RP2350 memory map for Pico 2
+# XIP flash is external, 4MB on Pico 2
+# SRAM is 520KB
+
+[[flash]]
+address = 0x10000000
+size = 0x400000  # 4MB
+read = true
+execute = true
+
+[[ram]]
+address = 0x20000000
+size = 0x82000  # 520KB
+read = true
+write = true
+execute = false

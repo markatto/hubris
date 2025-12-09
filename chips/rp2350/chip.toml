@@ -1,0 +1,58 @@
+# RP2350 (Pico 2) peripheral definitions
+# Based on RP2350 datasheet
+
+[resets]
+address = 0x40020000
+size = 4096
+
+[io_bank0]
+address = 0x40028000
+size = 4096
+
+[pads_bank0]
+address = 0x40038000
+size = 4096
+
+[sio]
+address = 0xd0000000
+size = 4096
+
+[timer0]
+address = 0x400b0000
+size = 4096
+
+[uart0]
+address = 0x40070000
+size = 4096
+
+[uart1]
+address = 0x40078000
+size = 4096
+
+[spi0]
+address = 0x40080000
+size = 4096
+
+[spi1]
+address = 0x40088000
+size = 4096
+
+[i2c0]
+address = 0x40090000
+size = 4096
+
+[i2c1]
+address = 0x40098000
+size = 4096
+
+[pwm]
+address = 0x400a8000
+size = 4096
+
+[xip_ctrl]
+address = 0x400c8000
+size = 4096
+
+[watchdog]
+address = 0x400d8000
+size = 4096
