@@ -93,6 +93,15 @@ impl Arch {
         }
     }
 
+    /// Get the kernel linker script for this architecture
+    pub fn kernel_link_script(&self) -> &'static str {
+        match self {
+            Arch::Arm => "build/kernel-link.x",
+            // RISC-V reuses the task link script for the kernel
+            Arch::RiscV => "build/task-link-riscv.x",
+        }
+    }
+
     /// Get the linker emulation for ld
     pub fn linker_emulation(&self) -> &'static str {
         match self {
@@ -1633,7 +1642,7 @@ fn build_kernel(
         image_name,
     )?;
 
-    fs::copy("build/kernel-link.x", "target/link.x")?;
+    fs::copy(cfg.arch.kernel_link_script(), "target/link.x")?;
 
     let image_id = image_id.finish();
 
