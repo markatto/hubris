@@ -30,6 +30,9 @@ use riscv::interrupt::{Exception, Interrupt, Trap};
 use riscv::register;
 use riscv::register::mstatus::MPP;
 
+mod timer;
+use timer::SysTimer;
+
 // Kernel logging - enabled via "klog-semihosting" feature
 // Run QEMU with -semihosting flag to see output
 #[allow(unused_macros)]
@@ -78,6 +81,10 @@ static mut CLOCK_FREQ_KHZ: u32 = 0;
 
 /// Tick counter for kernel time.
 static mut TICKS: u64 = 0;
+
+/// Global timer instance.
+/// The concrete type is selected in timer.rs based on the target chip.
+static TIMER: timer::Timer = timer::Timer::new();
 
 /// Architecture-specific extension data for memory regions.
 ///
@@ -529,35 +536,15 @@ unsafe fn handle_fault(task: *mut task::Task, fault: FaultInfo) {
     }
 }
 
-// Timer handling via CLINT (Core Local Interruptor).
+// Timer handling via the SysTimer trait.
 //
-// We use riscv-peripheral for safe register access. The CLINT provides:
-//   - MSIP (software interrupt) at offset 0x0000
-//   - MTIMECMP at offset 0x4000
-//   - MTIME at offset 0xBFF8
-//
-// QEMU virt machine uses standard CLINT at 0x0200_0000.
-// TODO: Make this configurable per-chip.
-
-riscv_peripheral::clint_codegen!(
-    CLINT,
-    base 0x0200_0000,
-    mtime_freq 10_000_000  // QEMU virt runs at 10MHz
-);
-
-fn set_timer(tick_divisor: u32) {
-    let clint = CLINT::new();
-    let mtimer = clint.mtimer();
-    // Set compare value first, then reset counter
-    // Hart 0's MTIMECMP is at offset 0 from the MTIMECMP base
-    mtimer.mtimecmp_mhartid().write(tick_divisor as u64);
-    mtimer.mtime().write(0);
-}
+// The specific timer implementation (CLINT, SYSTIMER, etc.) is selected
+// at compile time via the TIMER global. Different chips need different
+// timer peripherals - see timer.rs for available implementations.
 
 fn safe_timer_handler(ticks: &mut u64, tasks: &mut [task::Task]) {
     *ticks += 1;
     let now = Timestamp::from(*ticks);
-    drop(ticks);
 
     let switch = task::process_timers(tasks, now);
 
@@ -578,7 +565,7 @@ fn safe_timer_handler(ticks: &mut u64, tasks: &mut [task::Task]) {
     }
 
     // Reset timer for next tick
-    CLINT::new().mtimer().mtime().write(0);
+    TIMER.reset();
 }
 
 /// Start the first task and begin executing.
@@ -600,7 +587,9 @@ pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
     // Configure the timer
     unsafe {
         CLOCK_FREQ_KHZ = tick_divisor;
-        set_timer(tick_divisor - 1);
+    }
+    TIMER.init(tick_divisor);
+    unsafe {
         register::mie::set_mtimer();
         register::mstatus::set_mie();
     }
