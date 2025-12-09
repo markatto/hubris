@@ -62,6 +62,7 @@ pub fn has_feature(s: &str) -> bool {
 ///
 /// This will set one of `cfg(armv6m)`, `cfg(armv7m)`, or `cfg(armv8m)`
 /// depending on the value of the `TARGET` environment variable.
+/// For RISC-V targets, no ARM cfg is set.
 pub fn expose_m_profile() -> Result<()> {
     let target = crate::target();
 
@@ -76,6 +77,8 @@ pub fn expose_m_profile() -> Result<()> {
         println!("cargo::rustc-cfg=armv7m");
     } else if target.starts_with("thumbv8m") {
         println!("cargo::rustc-cfg=armv8m");
+    } else if target.starts_with("riscv") {
+        // RISC-V targets don't use ARM M-profile cfg flags
     } else {
         bail!("Don't know the target {target}");
     }

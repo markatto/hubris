@@ -4403,6 +4403,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pico2"
+version = "0.1.0"
+dependencies = [
+ "build-util",
+ "cfg-if",
+ "kern",
+ "panic-halt",
+ "riscv",
+ "riscv-rt",
+]
+
+[[package]]
 name = "pkcs1"
 version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5878,6 +5890,7 @@ name = "task-idle"
 version = "0.1.0"
 dependencies = [
  "cortex-m",
+ "riscv",
  "userlib",
 ]
 

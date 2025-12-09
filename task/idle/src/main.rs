@@ -9,23 +9,36 @@
 // - we need it for our _start routine.
 extern crate userlib;
 
+#[cfg(target_arch = "riscv32")]
+use userlib::*;
+
 #[export_name = "main"]
 fn main() -> ! {
     loop {
-        if cfg!(feature = "insomniac") {
-            // In insomniac-mode, we just spinloop to absorb idle cycles. This
-            // is useful on certain processors where entering a low-power state
-            // interrupts debugging.
-            //
-            // Note that this is an explicit nop rather than an empty block
-            // because an empty `loop {}` is technically UB and will be replaced
-            // by a trap, bringing the system to a halt with no tasks runnable.
-            // So, do not get clever and remove this.
-            cortex_m::asm::nop();
-        } else {
-            // Wait For Interrupt to pause the processor until an ISR arrives,
-            // which could wake some higher-priority task.
-            cortex_m::asm::wfi();
+        #[cfg(target_arch = "arm")]
+        {
+            if cfg!(feature = "insomniac") {
+                // In insomniac-mode, we just spinloop to absorb idle cycles. This
+                // is useful on certain processors where entering a low-power state
+                // interrupts debugging.
+                //
+                // Note that this is an explicit nop rather than an empty block
+                // because an empty `loop {}` is technically UB and will be replaced
+                // by a trap, bringing the system to a halt with no tasks runnable.
+                // So, do not get clever and remove this.
+                cortex_m::asm::nop();
+            } else {
+                // Wait For Interrupt to pause the processor until an ISR arrives,
+                // which could wake some higher-priority task.
+                cortex_m::asm::wfi();
+            }
+        }
+
+        #[cfg(target_arch = "riscv32")]
+        {
+            // RISC-V wfi is privileged, so we spin on a timer call instead.
+            // This is what jperkin's port did.
+            while sys_get_timer().now > 0 {}
         }
     }
 }
