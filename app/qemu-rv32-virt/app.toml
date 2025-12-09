@@ -15,7 +15,6 @@ priority = 0
 max-sizes = {flash = 16384, ram = 2048}
 start = true
 stacksize = 1024
-features = ["nano"]
 notifications = ["fault", "timer"]
 
 [tasks.uart]
