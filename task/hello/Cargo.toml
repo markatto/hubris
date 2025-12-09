@@ -1,0 +1,19 @@
+[package]
+name = "task-hello"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+userlib = { path = "../../sys/userlib" }
+
+[build-dependencies]
+build-util = { path = "../../build/util" }
+
+[[bin]]
+name = "task-hello"
+test = false
+doctest = false
+bench = false
+
+[lints]
+workspace = true

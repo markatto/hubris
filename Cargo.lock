@@ -1954,6 +1954,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "drv-ns16550-uart"
+version = "0.1.0"
+dependencies = [
+ "build-util",
+ "ns16550a",
+ "num-derive 0.4.2",
+ "num-traits",
+ "userlib",
+ "zerocopy 0.8.27",
+]
+
+[[package]]
 name = "drv-onewire"
 version = "0.1.0"
 dependencies = [
@@ -4116,6 +4128,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72ef4a56884ca558e5ddb05a1d1e7e1bfd9a68d9ed024c21704cc98872dae1bb"
 
 [[package]]
+name = "ns16550a"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3cd8abe9e54bce27659507b94f355c9334378ab15da332b6986b3583ebf7228"
+
+[[package]]
 name = "num"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5856,6 +5874,14 @@ dependencies = [
  "stm32h7",
  "task-jefe-api",
  "task-packrat-api",
+ "userlib",
+]
+
+[[package]]
+name = "task-hello"
+version = "0.1.0"
+dependencies = [
+ "build-util",
  "userlib",
 ]
 
