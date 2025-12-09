@@ -258,6 +258,7 @@ fn process_config() -> Result<Generated> {
     } else if target.starts_with("thumbv7m")
         || target.starts_with("thumbv7em")
         || target.starts_with("thumbv8m")
+        || target.starts_with("riscv32")
     {
         // First, try to build it as a single-level perfect hash map, which is
         // cheaper but won't always succeed.

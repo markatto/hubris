@@ -691,5 +691,6 @@ pub fn disable_irq(n: u32) {}
 #[allow(unused_variables)]
 pub fn enable_irq(n: u32) {}
 
-// Constants that may change depending on configuration
-include!(concat!(env!("OUT_DIR"), "/consts.rs"));
+// TODO: Constants that may change depending on configuration
+// The timer addresses below are hardcoded for FE310 (HiFive RevB).
+// RP2350 uses a different timer peripheral that needs to be configured here.

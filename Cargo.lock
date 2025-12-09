@@ -5939,6 +5939,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "task-jefe-stub"
+version = "0.1.0"
+dependencies = [
+ "userlib",
+]
+
+[[package]]
 name = "task-monorail-server"
 version = "0.1.0"
 dependencies = [

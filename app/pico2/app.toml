@@ -9,11 +9,11 @@ name = "pico2"
 requires = {flash = 32768, ram = 8192}
 
 [tasks.jefe]
-name = "task-jefe"
+name = "task-jefe-stub"
 priority = 0
-max-sizes = {flash = 16384, ram = 4096}
+max-sizes = {flash = 4096, ram = 1024}
 start = true
-stacksize = 1536
+stacksize = 512
 
 [tasks.idle]
 name = "task-idle"

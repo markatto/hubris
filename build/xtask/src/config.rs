@@ -547,11 +547,13 @@ impl Config {
     fn mpu_alignment(&self) -> MpuAlignment {
         // ARMv6-M and ARMv7-M require that memory regions be a power of two.
         // ARMv8-M does not.
+        // RISC-V PMP with NAPOT encoding requires power-of-two alignment.
         match self.target.as_str() {
             "thumbv8m.main-none-eabihf" => MpuAlignment::Chunk(32),
             "thumbv7em-none-eabihf" | "thumbv6m-none-eabi" => {
                 MpuAlignment::PowerOfTwo
             }
+            "riscv32imac-unknown-none-elf" => MpuAlignment::PowerOfTwo,
             t => panic!("Unknown mpu requirements for target '{t}'"),
         }
     }

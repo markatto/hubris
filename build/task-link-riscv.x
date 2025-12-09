@@ -1,25 +1,21 @@
-PROVIDE(_stext = ORIGIN(REGION_TEXT));
-PROVIDE(_stack_start = ORIGIN(REGION_STACK) + LENGTH(REGION_STACK));
-PROVIDE(_heap_size = 0);
+INCLUDE memory.x
 
 ENTRY(_start);
 
 SECTIONS
 {
+  PROVIDE(_stack_start = ORIGIN(STACK) + LENGTH(STACK));
 
-  .text.dummy (NOLOAD) :
-  {
-    /* This section is intended to make _stext address work */
-    . = ABSOLUTE(_stext);
-  } > REGION_TEXT
-
-  .text _stext :
-  {
-    . = ALIGN(4);
+  /* ### .text */
+  .text : {
+    _stext = .;
     *(.text.start*); /* try and pull start symbol to beginning */
     *(.text .text.*);
-  } > REGION_TEXT =0xdededede
+    . = ALIGN(4);
+    __etext = .;
+  } > FLASH =0xdededede
 
+  /* ### .rodata */
   .rodata : ALIGN(4)
   {
     *(.srodata .srodata.*);
@@ -29,44 +25,66 @@ SECTIONS
        This is required by LLD to ensure the LMA of the following .data
        section will have the correct alignment. */
     . = ALIGN(4);
-  } > REGION_RODATA
+    __erodata = .;
+  } > FLASH
 
-  .data : ALIGN(4)
-  {
-    _sidata = LOADADDR(.data);
-    _sdata = .;
+  /*
+   * Sections in RAM
+   *
+   * NOTE: the userlib runtime assumes that these sections
+   * are 4-byte aligned and padded to 4-byte boundaries.
+   */
+  .data : ALIGN(4) {
+    . = ALIGN(4);
+    __sidata = LOADADDR(.data);
+    __sdata = .;
     /* Must be called __global_pointer$ for linker relaxations to work. */
     PROVIDE(__global_pointer$ = . + 0x800);
     *(.sdata .sdata.* .sdata2 .sdata2.*);
     *(.data .data.*);
-    . = ALIGN(4);
-    _edata = .;
-  } > REGION_DATA AT > REGION_RODATA
+    . = ALIGN(4); /* 4-byte align the end (VMA) of this section */
+    __edata = .;
+  } > RAM AT>FLASH
 
-  .bss (NOLOAD) :
+  .bss (NOLOAD) : ALIGN(4)
   {
-    _sbss = .;
+    . = ALIGN(4);
+    __sbss = .;
     *(.sbss .sbss.* .bss .bss.*);
-    . = ALIGN(4);
-    _ebss = .;
-  } > REGION_BSS
+    . = ALIGN(4); /* 4-byte align the end (VMA) of this section */
+    __ebss = .;
+  } > RAM
 
-  /* fictitious region that represents the memory available for the heap */
-  .heap (NOLOAD) :
+  .uninit (NOLOAD) : ALIGN(4)
   {
-    _sheap = .;
-    . += _heap_size;
     . = ALIGN(4);
-    _eheap = .;
-  } > REGION_HEAP
+    *(.uninit .uninit.*);
+    . = ALIGN(4);
+    /* Place the heap right after `.uninit` */
+    __sheap = .;
+  } > RAM
 
-  /* fictitious region that represents the memory available for the stack */
-  .stack (NOLOAD) :
-  {
-    _estack = .;
-    . = ABSOLUTE(_stack_start);
-    _sstack = .;
-  } > REGION_STACK
+  /* ## .task_slot_table */
+  /* Table of TaskSlot instances and their names. Used to resolve task
+     dependencies during packaging. */
+  .task_slot_table (INFO) : {
+    . = .;
+    KEEP(*(.task_slot_table));
+  }
+
+  /* ## .caboose_pos_table */
+  /* Table of CaboosePos instances and their names. Used to record caboose
+     position during packaging. */
+  .caboose_pos_table (INFO) : {
+    . = .;
+    KEEP(*(.caboose_pos_table));
+  }
+
+  /* ## .idolatry */
+  .idolatry (INFO) : {
+    . = .;
+    KEEP(*(.idolatry));
+  }
 
   /* fake output .got section */
   /* Dynamic relocations are unsupported. This section is only used to detect
@@ -80,11 +98,9 @@ SECTIONS
   .eh_frame (INFO) : { KEEP(*(.eh_frame)) }
   .eh_frame_hdr (INFO) : { *(.eh_frame_hdr) }
 
-  /* ## .task_slot_table */
-  /* Table of TaskSlot instances and their names. Used to resolve task
-     dependencies during packaging. */
-  .task_slot_table (INFO) : {
-    . = .;
-    KEEP(*(.task_slot_table));
+  /* ## Discarded sections */
+  /DISCARD/ :
+  {
+    *(.riscv.attributes);
   }
 }
