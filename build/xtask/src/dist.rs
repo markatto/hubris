@@ -50,6 +50,72 @@ pub const DEFAULT_KERNEL_STACK: u32 = 1024;
 /// which interferes with subsequent programming of auxiliary flash.
 const HUBRIS_ARCHIVE_VERSION: u32 = 10;
 
+/// Target architecture for the build
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arch {
+    Arm,
+    RiscV,
+}
+
+impl Arch {
+    /// Detect architecture from target triple
+    pub fn from_target(target: &str) -> Result<Self> {
+        if target.starts_with("thumb") {
+            Ok(Arch::Arm)
+        } else if target.starts_with("riscv") {
+            Ok(Arch::RiscV)
+        } else {
+            bail!("unsupported target architecture: {}", target)
+        }
+    }
+
+    /// Get the objcopy command for this architecture
+    pub fn objcopy_cmd(&self) -> &'static str {
+        match self {
+            Arch::Arm => "arm-none-eabi-objcopy",
+            Arch::RiscV => "riscv64-unknown-elf-objcopy",
+        }
+    }
+
+    /// Get the ELF target format for objcopy
+    pub fn elf_target(&self) -> &'static str {
+        match self {
+            Arch::Arm => "elf32-littlearm",
+            Arch::RiscV => "elf32-littleriscv",
+        }
+    }
+
+    /// Get the task linker script for this architecture
+    pub fn task_link_script(&self) -> &'static str {
+        match self {
+            Arch::Arm => "build/task-link.x",
+            Arch::RiscV => "build/task-link-riscv.x",
+        }
+    }
+
+    /// Get the linker emulation for ld
+    pub fn linker_emulation(&self) -> &'static str {
+        match self {
+            Arch::Arm => "armelf",
+            Arch::RiscV => "elf32lriscv",
+        }
+    }
+
+    /// Get the expected ELF machine type
+    pub fn elf_machine(&self) -> u16 {
+        match self {
+            Arch::Arm => goblin::elf::header::EM_ARM,
+            Arch::RiscV => goblin::elf::header::EM_RISCV,
+        }
+    }
+
+    /// Check if an ELF machine type is supported by any architecture
+    pub fn is_supported_machine(machine: u16) -> bool {
+        machine == goblin::elf::header::EM_ARM
+            || machine == goblin::elf::header::EM_RISCV
+    }
+}
+
 /// `PackageConfig` contains a bundle of data that's commonly used when
 /// building a full app image, grouped together to avoid passing a bunch
 /// of individual arguments to functions.
@@ -61,6 +127,9 @@ pub struct PackageConfig {
     ///
     /// Files specified within the manifest are relative to this directory
     app_src_dir: PathBuf,
+
+    /// Target architecture (ARM or RISC-V)
+    pub arch: Arch,
 
     /// Loaded configuration
     pub toml: Config,
@@ -125,10 +194,20 @@ impl PackageConfig {
             .ok_or_else(|| anyhow!("Could not get host from rustc"))?
             .to_string();
 
+        // Detect target architecture
+        let arch = Arch::from_target(&toml.target)?;
+
         let mut extra_hash = fnv::FnvHasher::default();
-        for f in ["task-link.x", "task-rlink.x", "kernel-link.x"] {
-            let file_data = std::fs::read(Path::new("build").join(f))?;
-            file_data.hash(&mut extra_hash);
+        let link_scripts = match arch {
+            Arch::Arm => vec!["task-link.x", "task-rlink.x", "kernel-link.x"],
+            Arch::RiscV => vec!["task-link-riscv.x"],
+        };
+        for f in link_scripts {
+            let path = Path::new("build").join(f);
+            if path.exists() {
+                let file_data = std::fs::read(&path)?;
+                file_data.hash(&mut extra_hash);
+            }
         }
 
         // We require a board file in the `boards` directory
@@ -140,6 +219,7 @@ impl PackageConfig {
 
         Ok(Self {
             app_src_dir: app_src_dir.to_path_buf(),
+            arch,
             toml,
             verbose,
             edges,
@@ -1438,7 +1518,7 @@ fn link_task(
         image_name,
     )
     .context(format!("failed to generate linker script for {name}"))?;
-    fs::copy("build/task-link.x", "target/link.x")?;
+    fs::copy(cfg.arch.task_link_script(), "target/link.x")?;
 
     // Link the static archive
     link(cfg, format!("{name}.elf"), format!("{image_name}/{name}"))
@@ -1621,8 +1701,8 @@ fn update_image_header(
     if elf.header.container()? != Container::Little {
         bail!("where did you get a big-endian image?");
     }
-    if elf.header.e_machine != goblin::elf::header::EM_ARM {
-        bail!("this is not an ARM file");
+    if !Arch::is_supported_machine(elf.header.e_machine) {
+        bail!("unsupported ELF machine type: {}", elf.header.e_machine);
     }
 
     // Good enough.
@@ -2192,17 +2272,11 @@ fn link(
     assert!(AsRef::<Path>::as_ref(&src_file).is_relative());
     assert!(AsRef::<Path>::as_ref(&dst_file).is_relative());
 
-    let m = match cfg.toml.target.as_str() {
-        "thumbv6m-none-eabi"
-        | "thumbv7em-none-eabihf"
-        | "thumbv8m.main-none-eabihf" => "armelf",
-        _ => bail!("No target emulation for '{}'", cfg.toml.target),
-    };
     cmd.arg(src_file);
     cmd.arg("-o").arg(dst_file);
     cmd.arg("-Tlink.x");
     cmd.arg("--gc-sections");
-    cmd.arg("-m").arg(m);
+    cmd.arg("-m").arg(cfg.arch.linker_emulation());
     cmd.arg("-z").arg("common-page-size=0x20");
     cmd.arg("-z").arg("max-page-size=0x20");
 
@@ -2894,8 +2968,8 @@ fn get_elf_entry_point(input: &Path) -> Result<u32> {
     if elf.header.container()? != Container::Little {
         bail!("where did you get a big-endian image?");
     }
-    if elf.header.e_machine != goblin::elf::header::EM_ARM {
-        bail!("this is not an ARM file");
+    if !Arch::is_supported_machine(elf.header.e_machine) {
+        bail!("unsupported ELF machine type: {}", elf.header.e_machine);
     }
 
     Ok(elf.header.e_entry as u32)
@@ -2914,7 +2988,11 @@ fn load_elf(
 
     // Checked in get_elf_entry_point above, but we'll re-check them here
     assert_eq!(elf.header.container()?, Container::Little);
-    assert_eq!(elf.header.e_machine, goblin::elf::header::EM_ARM);
+    assert!(
+        Arch::is_supported_machine(elf.header.e_machine),
+        "unsupported ELF machine type: {}",
+        elf.header.e_machine
+    );
 
     let mut flash = 0;
 
