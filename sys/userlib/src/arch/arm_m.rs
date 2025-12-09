@@ -2,465 +2,1083 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! User application architecture support stubs for ARM.
+//! ARM M-profile architecture support for userlib.
 //!
-//! See the note on syscall stubs at the top of the userlib module for
-//! rationale.
+//! This module contains the syscall stubs and entry point for ARM Cortex-M
+//! processors. The stubs use inline assembly to perform syscalls via SVC.
+//!
+//! There are separate implementations for ARMv6-M (Cortex-M0/M0+) and
+//! ARMv7-M/ARMv8-M (Cortex-M3/M4/M7/M33/etc) due to instruction set
+//! differences.
 
-use crate::*;
+use core::arch;
 
-/// This is the entry point for the kernel. Its job is to set up our memory
-/// before jumping to user-defined `main`.
+use crate::{
+    BorrowReadArgs, BorrowWriteArgs, RawBorrowInfo, RawRecvMessage,
+    RawTimerState, RcLen, SendArgs, Sysnum,
+};
+
+/// This is the entry point for the task, invoked by the kernel. Its job is to
+/// set up our memory before jumping to user-defined `main`.
 #[doc(hidden)]
 #[no_mangle]
 #[link_section = ".text.start"]
-#[naked]
+#[unsafe(naked)]
 pub unsafe extern "C" fn _start() -> ! {
     // Provided by the user program:
     extern "Rust" {
         fn main() -> !;
     }
 
-    asm!("
-        @ Copy data initialization image into data section.
-        @ Note: this assumes that both source and destination are 32-bit
-        @ aligned and padded to 4-byte boundary.
+    cfg_if::cfg_if! {
+        if #[cfg(armv6m)] {
+            arch::naked_asm!("
+                @ Copy data initialization image into data section.
+                @ Note: this assumes that both source and destination are 32-bit
+                @ aligned and padded to 4-byte boundary.
 
-        movw r0, #:lower16:__edata  @ upper bound in r0
-        movt r0, #:upper16:__edata
+                ldr r0, =__edata            @ upper bound in r0
+                ldr r1, =__sidata           @ source in r1
+                ldr r2, =__sdata            @ dest in r2
 
-        movw r1, #:lower16:__sidata @ source in r1
-        movt r1, #:upper16:__sidata
+                b 1f                        @ check for zero-sized data
 
-        movw r2, #:lower16:__sdata  @ dest in r2
-        movt r2, #:upper16:__sdata
+            2:  ldm r1!, {{r3}}             @ read and advance source
+                stm r2!, {{r3}}             @ write and advance dest
 
-        b 1f                        @ check for zero-sized data
+            1:  cmp r2, r0                  @ has dest reached the upper bound?
+                bne 2b                      @ if not, repeat
 
-    2:  ldr r3, [r1], #4            @ read and advance source
-        str r3, [r2], #4            @ write and advance dest
+                @ Zero BSS section.
 
-    1:  cmp r2, r0                  @ has dest reached the upper bound?
-        bne 2b                      @ if not, repeat
+                ldr r0, =__ebss             @ upper bound in r0
+                ldr r1, =__sbss             @ base in r1
 
-        @ Zero BSS section.
+                movs r2, #0                 @ materialize a zero
 
-        movw r0, #:lower16:__ebss   @ upper bound in r0
-        movt r0, #:upper16:__ebss
+                b 1f                        @ check for zero-sized BSS
 
-        movw r1, #:lower16:__sbss   @ base in r1
-        movt r1, #:upper16:__sbss
+            2:  stm r1!, {{r2}}             @ zero one word and advance
 
-        movs r2, #0                 @ materialize a zero
+            1:  cmp r1, r0                  @ has base reached bound?
+                bne 2b                      @ if not, repeat
 
-        b 1f                        @ check for zero-sized BSS
+                @ Be extra careful to ensure that those side effects are
+                @ visible to the user program.
 
-    2:  str r2, [r1], #4            @ zero one word and advance
+                dsb         @ complete all writes
+                isb         @ and flush the pipeline
 
-    1:  cmp r1, r0                  @ has base reached bound?
-        bne 2b                      @ if not, repeat
+                @ Now, to the user entry point. We call it in case it
+                @ returns. (It's not supposed to.) We reference it through
+                @ a sym operand because it's a Rust func and may be mangled.
+                bl {main}
 
-        @ Be extra careful to ensure that those side effects are
-        @ visible to the user program.
+                @ The noreturn option below will automatically generate an
+                @ undefined instruction trap past this point, should main
+                @ return.
+                ",
+                main = sym main,
+            )
+        } else if #[cfg(any(armv7m, armv8m))] {
+            arch::naked_asm!("
+                @ Copy data initialization image into data section.
+                @ Note: this assumes that both source and destination are 32-bit
+                @ aligned and padded to 4-byte boundary.
 
-        dsb         @ complete all writes
-        isb         @ and flush the pipeline
+                movw r0, #:lower16:__edata  @ upper bound in r0
+                movt r0, #:upper16:__edata
 
-        @ Now, to the user entry point. We call it in case it
-        @ returns. (It's not supposed to.) We reference it through
-        @ a sym operand because it's a Rust func and may be mangled.
-        bl {main}
+                movw r1, #:lower16:__sidata @ source in r1
+                movt r1, #:upper16:__sidata
 
-        @ The noreturn option below will automatically generate an
-        @ undefined instruction trap past this point, should main
-        @ return.
-        ",
-        main = sym main,
-        options(noreturn),
-    )
-}
+                movw r2, #:lower16:__sdata  @ dest in r2
+                movt r2, #:upper16:__sdata
 
-/// Core implementation of the REFRESH_TASK_ID syscall.
-#[naked]
-pub(crate) unsafe extern "C" fn sys_refresh_task_id_stub(_tid: u32) -> u32 {
-    asm!("
-        @ Spill the registers we're about to use to pass stuff. Note that we're
-        @ being clever and pushing only the registers we need (plus one to
-        @ maintain alignment); this means the pop sequence at the end needs to
-        @ match!
-        push {{r4, r5, r11, lr}}
+                b 1f                        @ check for zero-sized data
 
-        @ Move register arguments into place.
-        mov r4, r0
-        @ Load the constant syscall number.
-        mov r11, {sysnum}
+            2:  ldr r3, [r1], #4            @ read and advance source
+                str r3, [r2], #4            @ write and advance dest
 
-        @ To the kernel!
-        svc #0
+            1:  cmp r2, r0                  @ has dest reached the upper bound?
+                bne 2b                      @ if not, repeat
 
-        @ Move result into place.
-        mov r0, r4
+                @ Zero BSS section.
 
-        @ Restore the registers we used and return.
-        pop {{r4, r5, r11, pc}}
-        ",
-        sysnum = const Sysnum::RefreshTaskId as u32,
-        options(noreturn),
-    )
+                movw r0, #:lower16:__ebss   @ upper bound in r0
+                movt r0, #:upper16:__ebss
+
+                movw r1, #:lower16:__sbss   @ base in r1
+                movt r1, #:upper16:__sbss
+
+                movs r2, #0                 @ materialize a zero
+
+                b 1f                        @ check for zero-sized BSS
+
+            2:  str r2, [r1], #4            @ zero one word and advance
+
+            1:  cmp r1, r0                  @ has base reached bound?
+                bne 2b                      @ if not, repeat
+
+                @ Be extra careful to ensure that those side effects are
+                @ visible to the user program.
+
+                dsb         @ complete all writes
+                isb         @ and flush the pipeline
+
+                @ Now, to the user entry point. We call it in case it
+                @ returns. (It's not supposed to.) We reference it through
+                @ a sym operand because it's a Rust func and may be mangled.
+                bl {main}
+
+                @ The noreturn option below will automatically generate an
+                @ undefined instruction trap past this point, should main
+                @ return.
+                ",
+                main = sym main,
+            )
+        } else {
+            compile_error!("missing .start routine for ARM profile")
+        }
+    }
 }
 
 /// Core implementation of the SEND syscall.
-#[naked]
+///
+/// See the note on syscall stubs at the top of the lib module for rationale.
+#[unsafe(naked)]
 pub(crate) unsafe extern "C" fn sys_send_stub(
     _args: &mut SendArgs<'_>,
 ) -> RcLen {
-    asm!("
-        @ Spill the registers we're about to use to pass stuff.
-        push {{r4-r11}}
-        @ Load in args from the struct.
-        ldm r0, {{r4-r10}}
-        @ Load the constant syscall number.
-        mov r11, {sysnum}
+    cfg_if::cfg_if! {
+        if #[cfg(armv6m)] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4-r7, lr}}
+                mov r4, r8
+                mov r5, r9
+                mov r6, r10
+                mov r7, r11
+                push {{r4-r7}}
+                @ Load the constant syscall number.
+                eors r4, r4
+                adds r4, #{sysnum}
+                mov r11, r4
+                @ Load in args from the struct.
+                ldm r0!, {{r4-r7}}
+                ldm r0, {{r0-r2}}
+                mov r8, r0
+                mov r9, r1
+                mov r10, r2
 
-        @ To the kernel!
-        svc #0
+                @ To the kernel!
+                svc #0
 
-        @ Move the two results back into their return positions.
-        mov r0, r4
-        mov r1, r5
-        @ Restore the registers we used.
-        pop {{r4-r11}}
-        @ Fin.
-        bx lr
-        ",
-        sysnum = const Sysnum::Send as u32,
-        options(noreturn),
-    )
+                @ Move the two results back into their return positions.
+                mov r0, r4
+                mov r1, r5
+                @ Restore the registers we used.
+                pop {{r4-r7}}
+                mov r8, r4
+                mov r9, r5
+                mov r10, r6
+                mov r11, r7
+                pop {{r4-r7, pc}}
+                ",
+                sysnum = const Sysnum::Send as u32,
+            )
+        } else if #[cfg(any(armv7m, armv8m))] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4-r11}}
+                @ Load in args from the struct.
+                ldm r0, {{r4-r10}}
+                @ Load the constant syscall number.
+                mov r11, {sysnum}
+
+                @ To the kernel!
+                svc #0
+
+                @ Move the two results back into their return positions.
+                mov r0, r4
+                mov r1, r5
+                @ Restore the registers we used.
+                pop {{r4-r11}}
+                @ Fin.
+                bx lr
+                ",
+                sysnum = const Sysnum::Send as u32,
+            )
+        } else {
+            compile_error!("missing sys_send_stub for ARM profile");
+        }
+    }
 }
 
 /// Core implementation of the RECV syscall.
-#[naked]
+///
+/// See the note on syscall stubs at the top of the lib module for rationale.
+#[unsafe(naked)]
 #[must_use]
 pub(crate) unsafe extern "C" fn sys_recv_stub(
     _buffer_ptr: *mut u8,
     _buffer_len: usize,
     _notification_mask: u32,
     _specific_sender: u32,
-    _out: *mut crate::RawRecvMessage,
+    _out: *mut RawRecvMessage,
 ) -> u32 {
-    asm!("
-        @ Spill the registers we're about to use to pass stuff.
-        push {{r4-r11}}
-        @ Move register arguments into their proper positions.
-        mov r4, r0
-        mov r5, r1
-        mov r6, r2
-        mov r7, r3
-        @ Read output buffer pointer from stack into a register that
-        @ is preserved during our syscall. Since we just pushed a
-        @ bunch of stuff, we need to read *past* it.
-        ldr r3, [sp, #(8 * 4)]
-        @ Load the constant syscall number.
-        mov r11, {sysnum}
+    cfg_if::cfg_if! {
+        if #[cfg(armv6m)] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4-r7, lr}}
+                mov r4, r8
+                mov r5, r9
+                mov r6, r10
+                mov r7, r11
+                push {{r4-r7}}
+                @ Load the constant syscall number.
+                eors r4, r4
+                adds r4, #{sysnum}
+                mov r11, r4
+                @ Move register arguments into their proper positions.
+                mov r4, r0
+                mov r5, r1
+                mov r6, r2
+                mov r7, r3
+                @ Read output buffer pointer from stack into a register that
+                @ is preserved during our syscall. Since we just pushed a
+                @ bunch of stuff, we need to read *past* it.
+                ldr r3, [sp, #(9 * 4)]
 
-        @ To the kernel!
-        svc #0
+                @ To the kernel!
+                svc #0
 
-        @ Move status flag (only used for closed receive) into return
-        @ position
-        mov r0, r4
-        @ Write all the results out into the raw output buffer.
-        stm r3, {{r5-r9}}
-        @ Restore the registers we used.
-        pop {{r4-r11}}
-        @ Fin.
-        bx lr
-        ",
-        sysnum = const Sysnum::Recv as u32,
-        options(noreturn),
-    )
+                @ Move status flag (only used for closed receive) into return
+                @ position
+                mov r0, r4
+                @ Write all the results out into the raw output buffer.
+                stm r3!, {{r5-r7}}
+                mov r5, r8
+                mov r6, r9
+                stm r3!, {{r5-r6}}
+
+                @ Restore the registers we used.
+                pop {{r4-r7}}
+                mov r8, r4
+                mov r9, r5
+                mov r10, r6
+                mov r11, r7
+                pop {{r4-r7, pc}}
+                ",
+                sysnum = const Sysnum::Recv as u32,
+            )
+        } else if #[cfg(any(armv7m, armv8m))] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4-r11}}
+                @ Move register arguments into their proper positions.
+                mov r4, r0
+                mov r5, r1
+                mov r6, r2
+                mov r7, r3
+                @ Read output buffer pointer from stack into a register that
+                @ is preserved during our syscall. Since we just pushed a
+                @ bunch of stuff, we need to read *past* it.
+                ldr r3, [sp, #(8 * 4)]
+                @ Load the constant syscall number.
+                mov r11, {sysnum}
+
+                @ To the kernel!
+                svc #0
+
+                @ Move status flag (only used for closed receive) into return
+                @ position
+                mov r0, r4
+                @ Write all the results out into the raw output buffer.
+                stm r3, {{r5-r9}}
+                @ Restore the registers we used.
+                pop {{r4-r11}}
+                @ Fin.
+                bx lr
+                ",
+                sysnum = const Sysnum::Recv as u32,
+            )
+        } else {
+            compile_error!("missing sys_recv_stub for ARM profile");
+        }
+    }
 }
 
 /// Core implementation of the REPLY syscall.
-#[naked]
+///
+/// See the note on syscall stubs at the top of the lib module for rationale.
+#[unsafe(naked)]
 pub(crate) unsafe extern "C" fn sys_reply_stub(
     _peer: u32,
     _code: u32,
     _message_ptr: *const u8,
     _message_len: usize,
 ) {
-    asm!("
-        @ Spill the registers we're about to use to pass stuff. Note that we're
-        @ being clever and pushing only the registers we need; this means the
-        @ pop sequence at the end needs to match! (Why are we pushing LR? Because
-        @ the ABI requires us to maintain 8-byte stack alignment, so we must
-        @ push registers in pairs.)
-        push {{r4-r7, r11, lr}}
+    cfg_if::cfg_if! {
+        if #[cfg(armv6m)] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff. Note
+                @ that we're being clever and pushing only the registers we
+                @ need; this means the pop sequence at the end needs to match!
+                push {{r4-r7, lr}}
+                mov r4, r11
+                push {{r4}}
 
-        @ Move register arguments into place.
-        mov r4, r0
-        mov r5, r1
-        mov r6, r2
-        mov r7, r3
-        @ Load the constant syscall number.
-        mov r11, {sysnum}
+                @ Load the constant syscall number.
+                eors r4, r4
+                adds r4, #{sysnum}
+                mov r11, r4
+                @ Move register arguments into place.
+                mov r4, r0
+                mov r5, r1
+                mov r6, r2
+                mov r7, r3
 
-        @ To the kernel!
-        svc #0
+                @ To the kernel!
+                svc #0
 
-        @ This call has no results.
+                @ This call has no results.
 
-        @ Restore the registers we used and return.
-        pop {{r4-r7, r11, pc}}
-        ",
-        sysnum = const Sysnum::Reply as u32,
-        options(noreturn),
-    )
+                @ Restore the registers we used and return.
+                pop {{r4}}
+                mov r11, r4
+                pop {{r4-r7, pc}}
+                ",
+                sysnum = const Sysnum::Reply as u32,
+            )
+        } else if #[cfg(any(armv7m, armv8m))] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff. Note
+                @ that we're being clever and pushing only the registers we
+                @ need; this means the pop sequence at the end needs to match!
+                push {{r4-r7, r11, lr}}
+
+                @ Move register arguments into place.
+                mov r4, r0
+                mov r5, r1
+                mov r6, r2
+                mov r7, r3
+                @ Load the constant syscall number.
+                mov r11, {sysnum}
+
+                @ To the kernel!
+                svc #0
+
+                @ This call has no results.
+
+                @ Restore the registers we used and return.
+                pop {{r4-r7, r11, pc}}
+                ",
+                sysnum = const Sysnum::Reply as u32,
+            )
+        } else {
+            compile_error!("missing sys_reply_stub for ARM profile");
+        }
+    }
 }
 
 /// Core implementation of the SET_TIMER syscall.
-#[naked]
+///
+/// See the note on syscall stubs at the top of the lib module for rationale.
+#[unsafe(naked)]
 pub(crate) unsafe extern "C" fn sys_set_timer_stub(
     _set_timer: u32,
     _deadline_lo: u32,
     _deadline_hi: u32,
     _notification: u32,
 ) {
-    asm!("
-        @ Spill the registers we're about to use to pass stuff. Note that we're
-        @ being clever and pushing only the registers we need; this means the
-        @ pop sequence at the end needs to match! (Why are we pushing LR? Because
-        @ the ABI requires us to maintain 8-byte stack alignment, so we must
-        @ push registers in pairs.)
-        push {{r4-r7, r11, lr}}
+    cfg_if::cfg_if! {
+        if #[cfg(armv6m)] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4-r7, lr}}
+                mov r4, r11
+                push {{r4}}
 
-        @ Move register arguments into place.
-        mov r4, r0
-        mov r5, r1
-        mov r6, r2
-        mov r7, r3
-        @ Load the constant syscall number.
-        mov r11, {sysnum}
+                @ Load the constant syscall number.
+                eors r4, r4
+                adds r4, #{sysnum}
+                mov r11, r4
+                @ Move register arguments into place.
+                mov r4, r0
+                mov r5, r1
+                mov r6, r2
+                mov r7, r3
 
-        @ To the kernel!
-        svc #0
+                @ To the kernel!
+                svc #0
 
-        @ This call has no results.
+                @ This call has no results.
 
-        @ Restore the registers we used and return.
-        pop {{r4-r7, r11, pc}}
-        ",
-        sysnum = const Sysnum::SetTimer as u32,
-        options(noreturn),
-    )
+                @ Restore the registers we used and return.
+                pop {{r4}}
+                mov r11, r4
+                pop {{r4-r7, pc}}
+                ",
+                sysnum = const Sysnum::SetTimer as u32,
+            )
+        } else if #[cfg(any(armv7m, armv8m))] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4-r7, r11, lr}}
+
+                @ Move register arguments into place.
+                mov r4, r0
+                mov r5, r1
+                mov r6, r2
+                mov r7, r3
+                @ Load the constant syscall number.
+                mov r11, {sysnum}
+
+                @ To the kernel!
+                svc #0
+
+                @ This call has no results.
+
+                @ Restore the registers we used and return.
+                pop {{r4-r7, r11, pc}}
+                ",
+                sysnum = const Sysnum::SetTimer as u32,
+            )
+        } else {
+            compile_error!("missing sys_set_timer_stub for ARM profile")
+        }
+    }
 }
 
 /// Core implementation of the BORROW_READ syscall.
 ///
-/// See the note on syscall stubs at the top of this module for rationale.
-#[naked]
+/// See the note on syscall stubs at the top of the lib module for rationale.
+#[unsafe(naked)]
 pub(crate) unsafe extern "C" fn sys_borrow_read_stub(
     _args: *mut BorrowReadArgs,
 ) -> RcLen {
-    asm!("
-        @ Spill the registers we're about to use to pass stuff. Note that we're
-        @ being clever and pushing only the registers we need; this means the
-        @ pop sequence at the end needs to match!
-        push {{r4-r8, r11}}
+    cfg_if::cfg_if! {
+        if #[cfg(armv6m)] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4-r7, lr}}
+                mov r4, r8
+                mov r5, r11
+                push {{r4, r5}}
 
-        @ Move register arguments into place.
-        ldm r0, {{r4-r8}}
-        @ Load the constant syscall number.
-        mov r11, {sysnum}
+                @ Load the constant syscall number.
+                eors r4, r4
+                adds r4, #{sysnum}
+                mov r11, r4
+                @ Move register arguments into place.
+                ldm r0!, {{r4-r7}}
+                ldm r0, {{r0}}
+                mov r8, r0
 
-        @ To the kernel!
-        svc #0
+                @ To the kernel!
+                svc #0
 
-        @ Move the results into place.
-        mov r0, r4
-        mov r1, r5
+                @ Move the results into place.
+                mov r0, r4
+                mov r1, r5
 
-        @ Restore the registers we used and return.
-        pop {{r4-r8, r11}}
-        bx lr
-        ",
-        sysnum = const Sysnum::BorrowRead as u32,
-        options(noreturn),
-    )
+                @ Restore the registers we used and return.
+                pop {{r4, r5}}
+                mov r11, r5
+                mov r8, r4
+                pop {{r4-r7, pc}}
+                ",
+                sysnum = const Sysnum::BorrowRead as u32,
+            )
+        } else if #[cfg(any(armv7m, armv8m))] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4-r8, r11}}
+
+                @ Move register arguments into place.
+                ldm r0, {{r4-r8}}
+                @ Load the constant syscall number.
+                mov r11, {sysnum}
+
+                @ To the kernel!
+                svc #0
+
+                @ Move the results into place.
+                mov r0, r4
+                mov r1, r5
+
+                @ Restore the registers we used and return.
+                pop {{r4-r8, r11}}
+                bx lr
+                ",
+                sysnum = const Sysnum::BorrowRead as u32,
+            )
+        } else {
+            compile_error!("missing sys_borrow_read_stub for ARM profile")
+        }
+    }
 }
 
 /// Core implementation of the BORROW_WRITE syscall.
-#[naked]
+///
+/// See the note on syscall stubs at the top of the lib module for rationale.
+#[unsafe(naked)]
 pub(crate) unsafe extern "C" fn sys_borrow_write_stub(
     _args: *mut BorrowWriteArgs,
 ) -> RcLen {
-    asm!("
-        @ Spill the registers we're about to use to pass stuff. Note that we're
-        @ being clever and pushing only the registers we need; this means the
-        @ pop sequence at the end needs to match!
-        push {{r4-r8, r11}}
+    cfg_if::cfg_if! {
+        if #[cfg(armv6m)] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4-r7, lr}}
+                mov r4, r8
+                mov r5, r11
+                push {{r4, r5}}
 
-        @ Move register arguments into place.
-        ldm r0, {{r4-r8}}
-        @ Load the constant syscall number.
-        mov r11, {sysnum}
+                @ Load the constant syscall number.
+                eors r4, r4
+                adds r4, #{sysnum}
+                mov r11, r4
+                @ Move register arguments into place.
+                ldm r0!, {{r4-r7}}
+                ldr r0, [r0]
+                mov r8, r0
 
-        @ To the kernel!
-        svc #0
+                @ To the kernel!
+                svc #0
 
-        @ Move the results into place.
-        mov r0, r4
-        mov r1, r5
+                @ Move the results into place.
+                mov r0, r4
+                mov r1, r5
 
-        @ Restore the registers we used and return.
-        pop {{r4-r8, r11}}
-        bx lr
-        ",
-        sysnum = const Sysnum::BorrowWrite as u32,
-        options(noreturn),
-    )
+                @ Restore the registers we used and return.
+                pop {{r4, r5}}
+                mov r11, r5
+                mov r8, r4
+                pop {{r4-r7, pc}}
+                bx lr
+                ",
+                sysnum = const Sysnum::BorrowWrite as u32,
+            )
+        } else if #[cfg(any(armv7m, armv8m))] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4-r8, r11}}
+
+                @ Move register arguments into place.
+                ldm r0, {{r4-r8}}
+                @ Load the constant syscall number.
+                mov r11, {sysnum}
+
+                @ To the kernel!
+                svc #0
+
+                @ Move the results into place.
+                mov r0, r4
+                mov r1, r5
+
+                @ Restore the registers we used and return.
+                pop {{r4-r8, r11}}
+                bx lr
+                ",
+                sysnum = const Sysnum::BorrowWrite as u32,
+            )
+        } else {
+            compile_error!("missing sys_borrow_write_stub for ARM profile")
+        }
+    }
 }
 
 /// Core implementation of the BORROW_INFO syscall.
-#[naked]
+///
+/// See the note on syscall stubs at the top of the lib module for rationale.
+#[unsafe(naked)]
 pub(crate) unsafe extern "C" fn sys_borrow_info_stub(
     _lender: u32,
     _index: usize,
     _out: *mut RawBorrowInfo,
 ) {
-    asm!("
-        @ Spill the registers we're about to use to pass stuff. Note that we're
-        @ being clever and pushing only the registers we need; this means the
-        @ pop sequence at the end needs to match!
-        push {{r4-r6, r11}}
+    cfg_if::cfg_if! {
+        if #[cfg(armv6m)] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4-r6, lr}}
+                mov r4, r11
+                push {{r4}}
 
-        @ Move register arguments into place.
-        mov r4, r0
-        mov r5, r1
-        @ Load the constant syscall number.
-        mov r11, {sysnum}
+                @ Load the constant syscall number.
+                eors r4, r4
+                adds r4, #{sysnum}
+                mov r11, r4
+                @ Move register arguments into place.
+                mov r4, r0
+                mov r5, r1
 
-        @ To the kernel!
-        svc #0
+                @ To the kernel!
+                svc #0
 
-        @ Move the results into place.
-        stm r2, {{r4-r6}}
+                @ Move the results into place.
+                stm r2!, {{r4-r6}}
 
-        @ Restore the registers we used and return.
-        pop {{r4-r6, r11}}
-        bx lr
-        ",
-        sysnum = const Sysnum::BorrowInfo as u32,
-        options(noreturn),
-    )
+                @ Restore the registers we used and return.
+                pop {{r4}}
+                mov r11, r4
+                pop {{r4-r6, pc}}
+                ",
+                sysnum = const Sysnum::BorrowInfo as u32,
+            )
+        } else if #[cfg(any(armv7m, armv8m))] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4-r6, r11}}
+
+                @ Move register arguments into place.
+                mov r4, r0
+                mov r5, r1
+                @ Load the constant syscall number.
+                mov r11, {sysnum}
+
+                @ To the kernel!
+                svc #0
+
+                @ Move the results into place.
+                stm r2, {{r4-r6}}
+
+                @ Restore the registers we used and return.
+                pop {{r4-r6, r11}}
+                bx lr
+                ",
+                sysnum = const Sysnum::BorrowInfo as u32,
+            )
+        } else {
+            compile_error!("missing sys_borrow_write_stub for ARM profile")
+        }
+    }
 }
 
 /// Core implementation of the IRQ_CONTROL syscall.
-#[naked]
+///
+/// See the note on syscall stubs at the top of the lib module for rationale.
+#[unsafe(naked)]
 pub(crate) unsafe extern "C" fn sys_irq_control_stub(_mask: u32, _enable: u32) {
-    asm!("
-        @ Spill the registers we're about to use to pass stuff. Note that we're
-        @ being clever and pushing only the registers we need; this means the
-        @ pop sequence at the end needs to match!
-        push {{r4, r5, r11, lr}}
+    cfg_if::cfg_if! {
+        if #[cfg(armv6m)] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4, r5, lr}}
+                mov r4, r11
+                push {{r4}}
 
-        @ Move register arguments into place.
-        mov r4, r0
-        mov r5, r1
-        @ Load the constant syscall number.
-        mov r11, {sysnum}
+                @ Load the constant syscall number.
+                eors r4, r4
+                adds r4, #{sysnum}
+                mov r11, r4
+                @ Move register arguments into place.
+                mov r4, r0
+                mov r5, r1
 
-        @ To the kernel!
-        svc #0
+                @ To the kernel!
+                svc #0
 
-        @ This call returns no results.
+                @ This call returns no results.
 
-        @ Restore the registers we used and return.
-        pop {{r4, r5, r11, pc}}
-        ",
-        sysnum = const Sysnum::IrqControl as u32,
-        options(noreturn),
-    )
+                @ Restore the registers we used and return.
+                pop {{r4}}
+                mov r11, r4
+                pop {{r4, r5, pc}}
+                ",
+                sysnum = const Sysnum::IrqControl as u32,
+            )
+        } else if #[cfg(any(armv7m, armv8m))] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4, r5, r11, lr}}
+
+                @ Move register arguments into place.
+                mov r4, r0
+                mov r5, r1
+                @ Load the constant syscall number.
+                mov r11, {sysnum}
+
+                @ To the kernel!
+                svc #0
+
+                @ This call returns no results.
+
+                @ Restore the registers we used and return.
+                pop {{r4, r5, r11, pc}}
+                ",
+                sysnum = const Sysnum::IrqControl as u32,
+            )
+        } else {
+            compile_error!("missing sys_irq_control stub for ARM profile")
+        }
+    }
 }
 
 /// Core implementation of the PANIC syscall.
-#[naked]
+///
+/// See the note on syscall stubs at the top of the lib module for rationale.
+#[unsafe(naked)]
 pub(crate) unsafe extern "C" fn sys_panic_stub(
     _msg: *const u8,
     _len: usize,
 ) -> ! {
-    asm!("
-        @ We're not going to return, so technically speaking we don't need to
-        @ save registers. However, we save them anyway, so that we can reconstruct
-        @ the state that led to the panic.
-        push {{r4, r5, r11, lr}}
+    cfg_if::cfg_if! {
+        if #[cfg(armv6m)] {
+            arch::naked_asm!("
+                @ We're not going to return, so technically speaking we don't
+                @ need to save registers. However, we save them anyway, so that
+                @ we can reconstruct the state that led to the panic.
+                push {{r4, r5, lr}}
+                mov r4, r11
+                push {{r4}}
 
-        @ Move register arguments into place.
-        mov r4, r0
-        mov r5, r1
-        @ Load the constant syscall number.
-        mov r11, {sysnum}
+                @ Load the constant syscall number.
+                eors r4, r4
+                adds r4, #{sysnum}
+                mov r11, r4
+                @ Move register arguments into place.
+                mov r4, r0
+                mov r5, r1
 
-        @ To the kernel!
-        svc #0
+                @ To the kernel!
+                svc #0
+                @ noreturn generates a udf to trap us if it returns.
+                ",
+                sysnum = const Sysnum::Panic as u32,
+            )
+        } else if #[cfg(any(armv7m, armv8m))] {
+            arch::naked_asm!("
+                @ We're not going to return, so technically speaking we don't
+                @ need to save registers. However, we save them anyway, so that
+                @ we can reconstruct the state that led to the panic.
+                push {{r4, r5, r11, lr}}
 
-        @ This really shouldn't return. Ensure this:
-        udf #0xad
-        ",
-        sysnum = const Sysnum::Panic as u32,
-        options(noreturn),
-    )
+                @ Move register arguments into place.
+                mov r4, r0
+                mov r5, r1
+                @ Load the constant syscall number.
+                mov r11, {sysnum}
+
+                @ To the kernel!
+                svc #0
+                @ noreturn generates a udf to trap us if it returns.
+                ",
+                sysnum = const Sysnum::Panic as u32,
+            )
+        } else {
+            compile_error!("missing sys_panic_stub for ARM profile")
+        }
+    }
 }
 
 /// Core implementation of the GET_TIMER syscall.
-#[naked]
+///
+/// See the note on syscall stubs at the top of the lib module for rationale.
+#[unsafe(naked)]
 pub(crate) unsafe extern "C" fn sys_get_timer_stub(_out: *mut RawTimerState) {
-    asm!("
-        @ Spill the registers we're about to use to pass stuff.
-        push {{r4-r11}}
-        @ Load the constant syscall number.
-        mov r11, {sysnum}
+    cfg_if::cfg_if! {
+        if #[cfg(armv6m)] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4-r7, lr}}
+                mov r4, r8
+                mov r5, r9
+                mov r6, r10
+                mov r7, r11
+                push {{r4-r7}}
+                @ Load the constant syscall number.
+                eors r4, r4
+                adds r4, #{sysnum}
+                mov r11, r4
 
-        @ To the kernel!
-        svc #0
+                @ To the kernel!
+                svc #0
 
-        @ Write all the results out into the raw output buffer.
-        stm r0, {{r4-r9}}
-        @ Restore the registers we used.
-        pop {{r4-r11}}
-        @ Fin.
-        bx lr
-        ",
-        sysnum = const Sysnum::GetTimer as u32,
-        options(noreturn),
-    )
+                @ Write all the results out into the raw output buffer.
+                stm r0!, {{r4-r7}}
+                mov r4, r8
+                mov r5, r9
+                stm r0!, {{r4, r5}}
+                @ Restore the registers we used.
+                pop {{r4-r7}}
+                mov r11, r7
+                mov r10, r6
+                mov r9, r5
+                mov r8, r4
+                pop {{r4-r7, pc}}
+                ",
+                sysnum = const Sysnum::GetTimer as u32,
+            )
+        } else if #[cfg(any(armv7m, armv8m))] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4-r11}}
+                @ Load the constant syscall number.
+                mov r11, {sysnum}
+
+                @ To the kernel!
+                svc #0
+
+                @ Write all the results out into the raw output buffer.
+                stm r0, {{r4-r9}}
+                @ Restore the registers we used.
+                pop {{r4-r11}}
+                @ Fin.
+                bx lr
+                ",
+                sysnum = const Sysnum::GetTimer as u32,
+            )
+        } else {
+            compile_error!("missing sys_get_timer_stub for ARM profile")
+        }
+    }
+}
+
+/// Core implementation of the REFRESH_TASK_ID syscall.
+///
+/// See the note on syscall stubs at the top of the lib module for rationale.
+#[unsafe(naked)]
+pub(crate) unsafe extern "C" fn sys_refresh_task_id_stub(_tid: u32) -> u32 {
+    cfg_if::cfg_if! {
+        if #[cfg(armv6m)] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                @ match!
+                push {{r4, r5, lr}}
+                mov r4, r11
+                push {{r4}}
+
+                @ Load the constant syscall number.
+                movs r4, #0
+                adds r4, #{sysnum}
+                mov r11, r4
+
+                @ Move register arguments into place.
+                mov r4, r0
+
+                @ To the kernel!
+                svc #0
+
+                @ Move result into place.
+                mov r0, r4
+
+                @ Restore the registers we used and return.
+                pop {{r4}}
+                mov r11, r4
+                pop {{r4, r5, pc}}
+                ",
+                sysnum = const Sysnum::RefreshTaskId as u32,
+            )
+        } else if #[cfg(any(armv7m, armv8m))] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4, r5, r11, lr}}
+
+                @ Move register arguments into place.
+                mov r4, r0
+                @ Load the constant syscall number.
+                mov r11, {sysnum}
+
+                @ To the kernel!
+                svc #0
+
+                @ Move result into place.
+                mov r0, r4
+
+                @ Restore the registers we used and return.
+                pop {{r4, r5, r11, pc}}
+                ",
+                sysnum = const Sysnum::RefreshTaskId as u32,
+            )
+        } else {
+            compile_error!("missing sys_refresh_task_id stub for ARM profile")
+        }
+    }
 }
 
 /// Core implementation of the POST syscall.
-#[naked]
+///
+/// See the note on syscall stubs at the top of the lib module for rationale.
+#[unsafe(naked)]
 pub(crate) unsafe extern "C" fn sys_post_stub(_tid: u32, _mask: u32) -> u32 {
-    asm!("
-        @ Spill the registers we're about to use to pass stuff. Note that we're
-        @ being clever and pushing only the registers we need; this means the
-        @ pop sequence at the end needs to match!
-        push {{r4, r5, r11, lr}}
+    cfg_if::cfg_if! {
+        if #[cfg(armv6m)] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4, r5, lr}}
+                mov r4, r11
+                push {{r4}}
 
-        @ Move register arguments into place.
-        mov r4, r0
-        mov r5, r1
-        @ Load the constant syscall number.
-        mov r11, {sysnum}
+                @ Load the constant syscall number.
+                movs r4, #0
+                adds r4, #{sysnum}
+                mov r11, r4
 
-        @ To the kernel!
-        svc #0
+                @ Move register arguments into place.
+                mov r4, r0
+                mov r5, r1
 
-        @ Move result into place.
-        mov r0, r4
+                @ To the kernel!
+                svc #0
 
-        @ Restore the registers we used and return.
-        pop {{r4, r5, r11, pc}}
-        ",
-        sysnum = const Sysnum::Post as u32,
-        options(noreturn),
-    )
+                @ Move result into place.
+                mov r0, r4
+
+                @ Restore the registers we used and return.
+                pop {{r4}}
+                mov r11, r4
+                pop {{r4, r5, pc}}
+                ",
+                sysnum = const Sysnum::Post as u32,
+            )
+        } else if #[cfg(any(armv7m, armv8m))] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4, r5, r11, lr}}
+
+                @ Move register arguments into place.
+                mov r4, r0
+                mov r5, r1
+                @ Load the constant syscall number.
+                mov r11, {sysnum}
+
+                @ To the kernel!
+                svc #0
+
+                @ Move result into place.
+                mov r0, r4
+
+                @ Restore the registers we used and return.
+                pop {{r4, r5, r11, pc}}
+                ",
+                sysnum = const Sysnum::Post as u32,
+            )
+        } else {
+            compile_error!("missing sys_post_stub for ARM profile")
+        }
+    }
+}
+
+/// Core implementation of the REPLY_FAULT syscall.
+///
+/// See the note on syscall stubs at the top of the lib module for rationale.
+#[unsafe(naked)]
+pub(crate) unsafe extern "C" fn sys_reply_fault_stub(_tid: u32, _reason: u32) {
+    cfg_if::cfg_if! {
+        if #[cfg(armv6m)] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4, r5, lr}}
+                mov r4, r11
+                push {{r4}}
+
+                @ Load the constant syscall number.
+                movs r4, #0
+                adds r4, #{sysnum}
+                mov r11, r4
+                @ Move register arguments into place.
+                mov r4, r0
+                mov r5, r1
+
+                @ To the kernel!
+                svc #0
+
+                @ This syscall has no results.
+
+                @ Restore the registers we used and return.
+                pop {{r4}}
+                mov r11, r4
+                pop {{r4, r5, pc}}
+                ",
+                sysnum = const Sysnum::ReplyFault as u32,
+            )
+        } else if #[cfg(any(armv7m, armv8m))] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4, r5, r11, lr}}
+
+                @ Move register arguments into place.
+                mov r4, r0
+                mov r5, r1
+                @ Load the constant syscall number.
+                mov r11, {sysnum}
+
+                @ To the kernel!
+                svc #0
+
+                @ This syscall has no results.
+
+                @ Restore the registers we used and return.
+                pop {{r4, r5, r11, pc}}
+                ",
+                sysnum = const Sysnum::ReplyFault as u32,
+            )
+        } else {
+            compile_error!("missing sys_reply_fault_stub for ARM profile")
+        }
+    }
+}
+
+/// Core implementation of the IRQ_STATUS syscall.
+///
+/// See the note on syscall stubs at the top of the lib module for rationale.
+#[unsafe(naked)]
+pub(crate) unsafe extern "C" fn sys_irq_status_stub(_mask: u32) -> u32 {
+    cfg_if::cfg_if! {
+        if #[cfg(armv6m)] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4, lr}}
+                mov r4, r11
+                push {{r4}}
+
+                @ Load the constant syscall number.
+                eors r4, r4
+                adds r4, #{sysnum}
+                mov r11, r4
+                @ Move register arguments into place.
+                mov r4, r0
+
+                @ To the kernel!
+                svc #0
+
+                @ Move result into place.
+                mov r0, r4
+
+                @ Restore the registers we used and return.
+                pop {{r4}}
+                mov r11, r4
+                pop {{r4, pc}}
+                ",
+                sysnum = const Sysnum::IrqStatus as u32,
+            )
+        } else if #[cfg(any(armv7m, armv8m))] {
+            arch::naked_asm!("
+                @ Spill the registers we're about to use to pass stuff.
+                push {{r4, r11, lr}}
+
+                @ Move register arguments into place.
+                mov r4, r0
+                @ Load the constant syscall number.
+                mov r11, {sysnum}
+
+                @ To the kernel!
+                svc #0
+
+                @ Move result into place.
+                mov r0, r4
+
+                @ Restore the registers we used and return.
+                pop {{r4, r11, pc}}
+                ",
+                sysnum = const Sysnum::IrqStatus as u32,
+            )
+        } else {
+            compile_error!("missing sys_irq_status stub for ARM profile")
+        }
+    }
 }
