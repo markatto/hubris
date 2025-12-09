@@ -7,6 +7,7 @@ stacksize = 1024
 [kernel]
 name = "qemu-rv32-virt"
 requires = {flash = 32768, ram = 8192}
+features = ["klog-semihosting"]
 
 [tasks.jefe]
 name = "task-jefe-stub"

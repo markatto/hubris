@@ -97,8 +97,7 @@ impl Arch {
     pub fn kernel_link_script(&self) -> &'static str {
         match self {
             Arch::Arm => "build/kernel-link.x",
-            // RISC-V reuses the task link script for the kernel
-            Arch::RiscV => "build/task-link-riscv.x",
+            Arch::RiscV => "build/kernel-link-riscv.x",
         }
     }
 
@@ -209,7 +208,7 @@ impl PackageConfig {
         let mut extra_hash = fnv::FnvHasher::default();
         let link_scripts = match arch {
             Arch::Arm => vec!["task-link.x", "task-rlink.x", "kernel-link.x"],
-            Arch::RiscV => vec!["task-link-riscv.x"],
+            Arch::RiscV => vec!["task-link-riscv.x", "kernel-link-riscv.x"],
         };
         for f in link_scripts {
             let path = Path::new("build").join(f);
@@ -1642,7 +1641,27 @@ fn build_kernel(
         image_name,
     )?;
 
-    fs::copy(cfg.arch.kernel_link_script(), "target/link.x")?;
+    // For ARM, we provide our own link.x with full SECTIONS.
+    // For RISC-V, we let riscv-rt provide link.x and just append REGION_ALIAS
+    // statements to memory.x.
+    match cfg.arch {
+        Arch::Arm => {
+            fs::copy(cfg.arch.kernel_link_script(), "target/link.x")?;
+        }
+        Arch::RiscV => {
+            // Remove any existing link.x from task builds so that riscv-rt's
+            // link.x is found instead (it provides startup code and sections)
+            let _ = fs::remove_file("target/link.x");
+
+            // Append REGION_ALIAS statements and Hubris metadata sections to memory.x
+            let mut linkscr = std::fs::OpenOptions::new()
+                .create(false)
+                .append(true)
+                .open("target/memory.x")?;
+            let extra_content = std::fs::read_to_string(cfg.arch.kernel_link_script())?;
+            write!(linkscr, "\n{}", extra_content)?;
+        }
+    }
 
     let image_id = image_id.finish();
 

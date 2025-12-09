@@ -26,16 +26,18 @@ use abi::{FaultInfo, FaultSource, InterruptNum, UsageError};
 
 extern crate riscv_rt;
 
+use riscv::interrupt::{Exception, Interrupt, Trap};
 use riscv::register;
-use riscv::register::mcause::{Exception, Interrupt, Trap};
 use riscv::register::mstatus::MPP;
 
-// Kernel logging - stubbed out for now
-// TODO: implement proper kernel logging for RISC-V
+// Kernel logging - enabled via "klog-semihosting" feature
+// Run QEMU with -semihosting flag to see output
 #[allow(unused_macros)]
 macro_rules! klog {
-    ($s:expr) => { };
-    ($s:expr, $($tt:tt)*) => { };
+    ($($tt:tt)*) => {
+        #[cfg(feature = "klog-semihosting")]
+        { let _ = riscv_semihosting::hprintln!($($tt)*); }
+    };
 }
 
 macro_rules! uassert {
@@ -261,67 +263,71 @@ pub fn reinitialize(task: &mut task::Task) {
 /// Apply memory protection settings for a task using PMP.
 #[allow(unused_variables)]
 pub fn apply_memory_protection(task: &task::Task) {
-    for (i, region) in task.region_table().iter().enumerate() {
-        let pmpaddr = region.arch_data.pmpaddr as usize;
-        let pmpcfg = region.arch_data.pmpcfg as usize;
+    // Safety: PMP register access is inherently unsafe as it controls memory
+    // protection. We trust that the task's region table contains valid entries.
+    unsafe {
+        for (i, region) in task.region_table().iter().enumerate() {
+            let pmpaddr = region.arch_data.pmpaddr as usize;
+            let pmpcfg = region.arch_data.pmpcfg as usize;
 
-        match i {
-            0 => {
-                register::pmpaddr0::write(pmpaddr);
-                register::pmpcfg0::write(
-                    register::pmpcfg0::read().bits & 0xFFFF_FF00 | pmpcfg,
-                );
-            }
-            1 => {
-                register::pmpaddr1::write(pmpaddr);
-                register::pmpcfg0::write(
-                    register::pmpcfg0::read().bits & 0xFFFF_00FF
-                        | (pmpcfg << 8),
-                );
-            }
-            2 => {
-                register::pmpaddr2::write(pmpaddr);
-                register::pmpcfg0::write(
-                    register::pmpcfg0::read().bits & 0xFF00_FFFF
-                        | (pmpcfg << 16),
-                );
-            }
-            3 => {
-                register::pmpaddr3::write(pmpaddr);
-                register::pmpcfg0::write(
-                    register::pmpcfg0::read().bits & 0x00FF_FFFF
-                        | (pmpcfg << 24),
-                );
-            }
-            4 => {
-                register::pmpaddr4::write(pmpaddr);
-                register::pmpcfg1::write(
-                    register::pmpcfg1::read().bits & 0xFFFF_FF00 | pmpcfg,
-                );
-            }
-            5 => {
-                register::pmpaddr5::write(pmpaddr);
-                register::pmpcfg1::write(
-                    register::pmpcfg1::read().bits & 0xFFFF_00FF
-                        | (pmpcfg << 8),
-                );
-            }
-            6 => {
-                register::pmpaddr6::write(pmpaddr);
-                register::pmpcfg1::write(
-                    register::pmpcfg1::read().bits & 0xFF00_FFFF
-                        | (pmpcfg << 16),
-                );
-            }
-            7 => {
-                register::pmpaddr7::write(pmpaddr);
-                register::pmpcfg1::write(
-                    register::pmpcfg1::read().bits & 0x00FF_FFFF
-                        | (pmpcfg << 24),
-                );
-            }
-            _ => {}
-        };
+            match i {
+                0 => {
+                    register::pmpaddr0::write(pmpaddr);
+                    register::pmpcfg0::write(
+                        register::pmpcfg0::read().bits & 0xFFFF_FF00 | pmpcfg,
+                    );
+                }
+                1 => {
+                    register::pmpaddr1::write(pmpaddr);
+                    register::pmpcfg0::write(
+                        register::pmpcfg0::read().bits & 0xFFFF_00FF
+                            | (pmpcfg << 8),
+                    );
+                }
+                2 => {
+                    register::pmpaddr2::write(pmpaddr);
+                    register::pmpcfg0::write(
+                        register::pmpcfg0::read().bits & 0xFF00_FFFF
+                            | (pmpcfg << 16),
+                    );
+                }
+                3 => {
+                    register::pmpaddr3::write(pmpaddr);
+                    register::pmpcfg0::write(
+                        register::pmpcfg0::read().bits & 0x00FF_FFFF
+                            | (pmpcfg << 24),
+                    );
+                }
+                4 => {
+                    register::pmpaddr4::write(pmpaddr);
+                    register::pmpcfg1::write(
+                        register::pmpcfg1::read().bits & 0xFFFF_FF00 | pmpcfg,
+                    );
+                }
+                5 => {
+                    register::pmpaddr5::write(pmpaddr);
+                    register::pmpcfg1::write(
+                        register::pmpcfg1::read().bits & 0xFFFF_00FF
+                            | (pmpcfg << 8),
+                    );
+                }
+                6 => {
+                    register::pmpaddr6::write(pmpaddr);
+                    register::pmpcfg1::write(
+                        register::pmpcfg1::read().bits & 0xFF00_FFFF
+                            | (pmpcfg << 16),
+                    );
+                }
+                7 => {
+                    register::pmpaddr7::write(pmpaddr);
+                    register::pmpcfg1::write(
+                        register::pmpcfg1::read().bits & 0x00FF_FFFF
+                            | (pmpcfg << 24),
+                    );
+                }
+                _ => {}
+            };
+        }
     }
 }
 
@@ -439,14 +445,18 @@ pub unsafe extern "C" fn _start_trap() {
 /// saved to SavedState.
 #[no_mangle]
 fn trap_handler(task: &mut task::Task) {
-    match register::mcause::read().cause() {
+    // Convert from raw trap cause to typed enum
+    let raw_trap = register::mcause::read().cause();
+    let trap: Result<Trap<Interrupt, Exception>, _> = raw_trap.try_into();
+
+    match trap {
         // Interrupts. Only our periodic MachineTimer interrupt is supported.
-        Trap::Interrupt(Interrupt::MachineTimer) => unsafe {
+        Ok(Trap::Interrupt(Interrupt::MachineTimer)) => unsafe {
             let ticks = &mut TICKS;
             with_task_table(|tasks| safe_timer_handler(ticks, tasks));
         },
         // System Calls.
-        Trap::Exception(Exception::UserEnvCall) => {
+        Ok(Trap::Exception(Exception::UserEnvCall)) => {
             // Advance program counter past ecall instruction.
             task.save_mut().pc = register::mepc::read() as u32 + 4;
             unsafe {
@@ -462,10 +472,10 @@ fn trap_handler(task: &mut task::Task) {
             }
         }
         // Exceptions. Routed via the most appropriate FaultInfo.
-        Trap::Exception(Exception::IllegalInstruction) => unsafe {
+        Ok(Trap::Exception(Exception::IllegalInstruction)) => unsafe {
             handle_fault(task, FaultInfo::IllegalInstruction);
         },
-        Trap::Exception(Exception::LoadFault) => unsafe {
+        Ok(Trap::Exception(Exception::LoadFault)) => unsafe {
             handle_fault(
                 task,
                 FaultInfo::MemoryAccess {
@@ -474,7 +484,7 @@ fn trap_handler(task: &mut task::Task) {
                 },
             );
         },
-        Trap::Exception(Exception::StoreFault) => unsafe {
+        Ok(Trap::Exception(Exception::StoreFault)) => unsafe {
             handle_fault(
                 task,
                 FaultInfo::MemoryAccess {
@@ -483,7 +493,7 @@ fn trap_handler(task: &mut task::Task) {
                 },
             );
         },
-        Trap::Exception(Exception::InstructionFault) => unsafe {
+        Ok(Trap::Exception(Exception::InstructionFault)) => unsafe {
             handle_fault(task, FaultInfo::IllegalText);
         },
         _ => {
@@ -574,13 +584,18 @@ fn safe_timer_handler(ticks: &mut u64, tasks: &mut [task::Task]) {
 /// Start the first task and begin executing.
 #[allow(unused_variables)]
 pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
+    klog!("start_first_task: tick_divisor={}", tick_divisor);
+
     // Configure MPP to switch us to User mode on exit from Machine mode.
     unsafe {
         register::mstatus::set_mpp(MPP::User);
     }
 
     // Write the initial task program counter.
-    register::mepc::write(task.save().pc as *const usize as usize);
+    let entry = task.save().pc as usize;
+    klog!("  entry={:#x} sp={:#x}", entry, task.save().sp);
+    // Safety: Writing mepc to set the task entry point before mret
+    unsafe { register::mepc::write(entry); }
 
     // Configure the timer
     unsafe {
@@ -589,6 +604,8 @@ pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
         register::mie::set_mtimer();
         register::mstatus::set_mie();
     }
+
+    klog!("  launching task");
 
     // Load first task pointer, set its initial stack pointer, and exit out
     // of machine mode, launching the task.

@@ -1,11 +1,12 @@
+/* RISC-V task linker script for Hubris
+ *
+ * Tasks use userlib's _start, not riscv-rt. This script defines all the
+ * memory sections and symbols that userlib's RISC-V startup code expects.
+ */
+
 INCLUDE memory.x
 
 ENTRY(_start);
-
-/* Symbols required by riscv-rt */
-PROVIDE(_max_hart_id = 0);
-PROVIDE(_hart_stack_size = 0x400);  /* 1KB per hart */
-PROVIDE(_mp_hook = 1);  /* Always continue for single-hart */
 
 SECTIONS
 {
@@ -41,28 +42,25 @@ SECTIONS
    */
   .data : ALIGN(4) {
     . = ALIGN(4);
-    __sidata = LOADADDR(.data);
-    _sidata = LOADADDR(.data);
     __sdata = .;
-    _sdata = .;
     /* Must be called __global_pointer$ for linker relaxations to work. */
     PROVIDE(__global_pointer$ = . + 0x800);
     *(.sdata .sdata.* .sdata2 .sdata2.*);
     *(.data .data.*);
     . = ALIGN(4); /* 4-byte align the end (VMA) of this section */
     __edata = .;
-    _edata = .;
   } > RAM AT>FLASH
+
+  /* LMA of .data */
+  __sidata = LOADADDR(.data);
 
   .bss (NOLOAD) : ALIGN(4)
   {
     . = ALIGN(4);
     __sbss = .;
-    _sbss = .;
     *(.sbss .sbss.* .bss .bss.*);
     . = ALIGN(4); /* 4-byte align the end (VMA) of this section */
     __ebss = .;
-    _ebss = .;
   } > RAM
 
   .uninit (NOLOAD) : ALIGN(4)

@@ -5,20 +5,19 @@
 #![no_std]
 #![no_main]
 
+// Pull in the riscv-rt runtime - this provides _start, trap handlers, etc.
+extern crate riscv_rt;
 use riscv_rt::entry;
 
 // QEMU virt machine runs at 10MHz by default
 const CYCLES_PER_MS: u32 = 10_000;
 
-/// Called before data/bss initialization. Do nothing for now.
-#[unsafe(no_mangle)]
-fn __pre_init() {}
-
-/// Called to set up interrupt handling. The kernel handles this itself.
-#[unsafe(no_mangle)]
-fn _setup_interrupts() {}
-
 #[entry]
 fn main() -> ! {
+    #[cfg(feature = "klog-semihosting")]
+    {
+        let _ = riscv_semihosting::hprintln!("Hubris starting on QEMU rv32 virt");
+    }
+
     unsafe { kern::startup::start_kernel(CYCLES_PER_MS) }
 }
