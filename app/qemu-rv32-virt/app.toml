@@ -10,11 +10,13 @@ requires = {flash = 32768, ram = 8192}
 features = ["klog-semihosting"]
 
 [tasks.jefe]
-name = "task-jefe-stub"
+name = "task-jefe"
 priority = 0
-max-sizes = {flash = 4096, ram = 1024}
+max-sizes = {flash = 16384, ram = 2048}
 start = true
-stacksize = 512
+stacksize = 1024
+features = ["nano"]
+notifications = ["fault", "timer"]
 
 [tasks.uart]
 name = "drv-ns16550-uart"
