@@ -4409,7 +4409,6 @@ dependencies = [
  "build-util",
  "cfg-if",
  "kern",
- "panic-halt",
  "riscv",
  "riscv-rt",
 ]

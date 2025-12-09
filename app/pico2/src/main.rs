@@ -5,12 +5,18 @@
 #![no_std]
 #![no_main]
 
-extern crate panic_halt;
-
 use riscv_rt::entry;
 
 // RP2350 runs at 150MHz by default
 const CYCLES_PER_MS: u32 = 150_000;
+
+/// Called before data/bss initialization. Do nothing for now.
+#[unsafe(no_mangle)]
+fn __pre_init() {}
+
+/// Called to set up interrupt handling. The kernel handles this itself.
+#[unsafe(no_mangle)]
+fn _setup_interrupts() {}
 
 #[entry]
 fn main() -> ! {

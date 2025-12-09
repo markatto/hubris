@@ -2,6 +2,11 @@ INCLUDE memory.x
 
 ENTRY(_start);
 
+/* Symbols required by riscv-rt */
+PROVIDE(_max_hart_id = 0);
+PROVIDE(_hart_stack_size = 0x400);  /* 1KB per hart */
+PROVIDE(_mp_hook = 1);  /* Always continue for single-hart */
+
 SECTIONS
 {
   PROVIDE(_stack_start = ORIGIN(STACK) + LENGTH(STACK));
@@ -37,22 +42,27 @@ SECTIONS
   .data : ALIGN(4) {
     . = ALIGN(4);
     __sidata = LOADADDR(.data);
+    _sidata = LOADADDR(.data);
     __sdata = .;
+    _sdata = .;
     /* Must be called __global_pointer$ for linker relaxations to work. */
     PROVIDE(__global_pointer$ = . + 0x800);
     *(.sdata .sdata.* .sdata2 .sdata2.*);
     *(.data .data.*);
     . = ALIGN(4); /* 4-byte align the end (VMA) of this section */
     __edata = .;
+    _edata = .;
   } > RAM AT>FLASH
 
   .bss (NOLOAD) : ALIGN(4)
   {
     . = ALIGN(4);
     __sbss = .;
+    _sbss = .;
     *(.sbss .sbss.* .bss .bss.*);
     . = ALIGN(4); /* 4-byte align the end (VMA) of this section */
     __ebss = .;
+    _ebss = .;
   } > RAM
 
   .uninit (NOLOAD) : ALIGN(4)

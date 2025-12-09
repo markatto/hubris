@@ -7,7 +7,6 @@ version = "0.1.0"
 
 [dependencies]
 cfg-if = { workspace = true }
-panic-halt = "0.2.0"
 riscv = { version = "0.11", features = ["critical-section-single-hart"] }
 riscv-rt = { version = "0.12" }
 

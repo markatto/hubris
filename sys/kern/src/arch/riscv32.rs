@@ -4,25 +4,25 @@
 
 //! Architecture support for RISC-V.
 //!
-//! Currently only the Freedom E310 core as found on the HiFive RevB and
-//! Sparkfun RED-V boards is supported, but adding support for other cores
-//! should be straight-forward.
+//! Currently targets RISC-V RV32IMAC cores running in Machine mode with
+//! Physical Memory Protection (PMP) for task isolation.
 //!
-//! As the FE310 core does not support it there is no Supervisor mode support,
-//! the kernel runs exclusively in Machine mode with tasks running in User
-//! mode.
-//!
-//! Interrupts (other than the Machine Timer used to advance the kernel
-//! timestamp) are not yet supported.
+//! The kernel runs in Machine mode with tasks running in User mode.
+//! External interrupts (other than the Machine Timer) are not yet fully
+//! supported.
 
+use core::arch::{asm, naked_asm};
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use crate::atomic::AtomicExt;
 
 use zerocopy::FromBytes;
 
-use crate::app;
+use crate::descs::RegionAttributes;
 use crate::task;
 use crate::time::Timestamp;
-use abi::{FaultInfo, FaultSource};
+use abi::{FaultInfo, FaultSource, InterruptNum, UsageError};
 
 extern crate riscv_rt;
 
@@ -30,26 +30,12 @@ use riscv::register;
 use riscv::register::mcause::{Exception, Interrupt, Trap};
 use riscv::register::mstatus::MPP;
 
-/// Log things from kernel context. This macro is made visible to the rest of
-/// the kernel by a chain of `#[macro_use]` attributes, but its implementation
-/// is very architecture-specific at the moment.
-///
-/// On RISC-V we are limited to semihosting, despite its shortcomings.
-///
-/// In the future, we will likely want to add at least one more mechanism for
-/// logging (one that can be presumably be made neutral with respect to
-/// architecure), whereby kernel logs can be produced somewhere (e.g., a ring
-/// buffer) from which they can be consumed by some entity for shipping
-/// elsewhere.
-///
-macro_rules! klog {
-    ($s:expr) => { let _ = riscv_semihosting::hprintln!($s); };
-    ($s:expr, $($tt:tt)*) => { let _ = riscv_semihosting::hprintln!($s, $($tt)*); };
-}
+// Kernel logging - stubbed out for now
+// TODO: implement proper kernel logging for RISC-V
 #[allow(unused_macros)]
-macro_rules! kdbg {
-    ($s:expr) => { let _ = riscv_semihosting::dbg!($s); };
-    ($s:expr, $($tt:tt)*) => { let _ = riscv_semihosting::dbg!($s, $($tt)*); };
+macro_rules! klog {
+    ($s:expr) => { };
+    ($s:expr, $($tt:tt)*) => { };
 }
 
 macro_rules! uassert {
@@ -80,15 +66,56 @@ static mut IRQ_TABLE_BASE: Option<NonNull<abi::Interrupt>> = None;
 #[no_mangle]
 static mut IRQ_TABLE_SIZE: usize = 0;
 
-/// On RISC-V we use a global to record the current task pointer.  It may be
-/// possible to use the mscratch register instead.
+/// On RISC-V we use a global to record the current task pointer.
 #[no_mangle]
 static mut CURRENT_TASK_PTR: Option<NonNull<task::Task>> = None;
 
-/// To allow our clock frequency to be easily determined from a debugger, we
-/// store it in memory.
+/// To allow our clock frequency to be easily determined from a debugger.
 #[no_mangle]
 static mut CLOCK_FREQ_KHZ: u32 = 0;
+
+/// Tick counter for kernel time.
+static mut TICKS: u64 = 0;
+
+/// Architecture-specific extension data for memory regions.
+///
+/// For RISC-V PMP, we pre-compute the pmpaddr and pmpcfg values at build time
+/// to speed up context switches.
+#[derive(Copy, Clone, Debug, Default)]
+#[repr(C)]
+pub struct RegionDescExt {
+    /// Pre-computed PMP address register value (base >> 2 | size_mask)
+    pub pmpaddr: u32,
+    /// Pre-computed PMP config byte (R/W/X bits + NAPOT mode)
+    pub pmpcfg: u8,
+}
+
+/// Compute the PMP register values for a memory region at build time.
+pub const fn compute_region_extension_data(
+    base: u32,
+    size: u32,
+    attributes: RegionAttributes,
+) -> RegionDescExt {
+    // NAPOT encoding requires power-of-two aligned regions
+    // pmpaddr = (base >> 2) | ((size >> 1) - 1)
+    let pmpaddr = (base >> 2) | ((size >> 1).wrapping_sub(1));
+
+    // Build pmpcfg byte: R=bit0, W=bit1, X=bit2, A=bits[4:3]
+    // NAPOT mode = 0b11 in A field
+    let mut pmpcfg: u8 = 0b11_000; // NAPOT mode
+
+    if attributes.contains(RegionAttributes::READ) {
+        pmpcfg |= 0b001;
+    }
+    if attributes.contains(RegionAttributes::WRITE) {
+        pmpcfg |= 0b010;
+    }
+    if attributes.contains(RegionAttributes::EXECUTE) {
+        pmpcfg |= 0b100;
+    }
+
+    RegionDescExt { pmpaddr, pmpcfg }
+}
 
 /// RISC-V volatile registers that must be saved across context switches.
 #[repr(C)]
@@ -138,7 +165,6 @@ impl task::ArchState for SavedState {
         self.sp
     }
 
-    /// Reads syscall argument register 0.
     fn arg0(&self) -> u32 {
         self.a0
     }
@@ -165,7 +191,6 @@ impl task::ArchState for SavedState {
         self.a7
     }
 
-    /// Writes syscall return argument 0.
     fn ret0(&mut self, x: u32) {
         self.a0 = x
     }
@@ -188,35 +213,39 @@ impl task::ArchState for SavedState {
 
 /// Records `tasks` as the system-wide task table.
 ///
-/// If a task table has already been set, panics.
-///
 /// # Safety
 ///
 /// This stashes a copy of `tasks` without revoking your right to access it,
 /// which is a potential aliasing violation if you call `with_task_table`. So
 /// don't do that. The normal kernel entry sequences avoid this issue.
 pub unsafe fn set_task_table(tasks: &mut [task::Task]) {
-    let prev_task_table = core::mem::replace(
-        &mut TASK_TABLE_BASE,
-        Some(NonNull::from(&mut tasks[0])),
-    );
-    // Catch double-uses of this function.
-    uassert_eq!(prev_task_table, None);
-    // Record length as well.
-    TASK_TABLE_SIZE = tasks.len();
+    unsafe {
+        let prev_task_table = core::mem::replace(
+            &mut TASK_TABLE_BASE,
+            Some(NonNull::from(&mut tasks[0])),
+        );
+        uassert_eq!(prev_task_table, None);
+        TASK_TABLE_SIZE = tasks.len();
+    }
 }
 
+/// Records `irqs` as the system-wide interrupt table.
+///
+/// # Safety
+///
+/// Same aliasing concerns as `set_task_table`.
 pub unsafe fn set_irq_table(irqs: &[abi::Interrupt]) {
-    let prev_table = core::mem::replace(
-        &mut IRQ_TABLE_BASE,
-        Some(NonNull::new_unchecked(irqs.as_ptr() as *mut abi::Interrupt)),
-    );
-    // Catch double-uses of this function.
-    uassert_eq!(prev_table, None);
-    // Record length as well.
-    IRQ_TABLE_SIZE = irqs.len();
+    unsafe {
+        let prev_table = core::mem::replace(
+            &mut IRQ_TABLE_BASE,
+            Some(NonNull::new_unchecked(irqs.as_ptr() as *mut abi::Interrupt)),
+        );
+        uassert_eq!(prev_table, None);
+        IRQ_TABLE_SIZE = irqs.len();
+    }
 }
 
+/// Reinitialize a task to its initial state.
 pub fn reinitialize(task: &mut task::Task) {
     *task.save_mut() = SavedState::default();
 
@@ -229,25 +258,12 @@ pub fn reinitialize(task: &mut task::Task) {
     task.save_mut().pc = task.descriptor().entry_point;
 }
 
+/// Apply memory protection settings for a task using PMP.
 #[allow(unused_variables)]
 pub fn apply_memory_protection(task: &task::Task) {
     for (i, region) in task.region_table().iter().enumerate() {
-        let mut pmpcfg: usize = 0;
-        if region.attributes.contains(app::RegionAttributes::READ) {
-            pmpcfg |= 0b001;
-        }
-        if region.attributes.contains(app::RegionAttributes::WRITE) {
-            pmpcfg |= 0b010;
-        }
-        if region.attributes.contains(app::RegionAttributes::EXECUTE) {
-            pmpcfg |= 0b100;
-        }
-        // Configure NAPOT (naturally aligned power-of-2) regions
-        pmpcfg |= 0b11_000;
-
-        let mut pmpaddr: usize = 0;
-        pmpaddr |= region.base as usize >> 2;
-        pmpaddr |= (region.size - 1) as usize;
+        let pmpaddr = region.arch_data.pmpaddr as usize;
+        let pmpcfg = region.arch_data.pmpcfg as usize;
 
         match i {
             0 => {
@@ -309,19 +325,20 @@ pub fn apply_memory_protection(task: &task::Task) {
     }
 }
 
-// Provide our own interrupt vector to handle save/restore of the task on
-// entry, overwriting the symbol set up by riscv-rt.  The repr(align(4)) is
-// necessary as the bottom bits are used to determine direct or vectored traps.
+// Trap handler entry point.
 //
-// We may want to switch to a vectored interrupt table at some point to improve
-// performance.
-#[naked]
+// We provide our own interrupt vector to handle save/restore of the task on
+// entry, overwriting the symbol set up by riscv-rt.
+//
+// Note: #[repr(align(4))] is not allowed on functions, so we use
+// #[link_section] with an aligned section instead.
+#[unsafe(naked)]
 #[no_mangle]
-#[repr(align(4))]
 #[link_section = ".trap.rust"]
 #[export_name = "_start_trap"]
 pub unsafe extern "C" fn _start_trap() {
-    asm!(
+    naked_asm!(
+        ".balign 4",
         "
         #
         # Store full task status on entry, setting up a0 to point at our
@@ -373,7 +390,7 @@ pub unsafe extern "C" fn _start_trap() {
 
         #
         # On the way out we may have switched to a different task, load
-        # everything in and resume (using t6 as it's resored last).
+        # everything in and resume (using t6 as it's restored last).
         #
         la t6, CURRENT_TASK_PTR
         lw t6, (t6)
@@ -415,32 +432,24 @@ pub unsafe extern "C" fn _start_trap() {
 
         mret
         ",
-        options(noreturn),
     );
 }
 
-//
-// The Rust side of our trap handler after the task's registers have been
-// saved to SavedState.
-//
+/// The Rust side of our trap handler after the task's registers have been
+/// saved to SavedState.
 #[no_mangle]
 fn trap_handler(task: &mut task::Task) {
     match register::mcause::read().cause() {
-        //
-        // Interrupts.  Only our periodic MachineTimer interrupt via mtime is
-        // supported at present.
-        //
+        // Interrupts. Only our periodic MachineTimer interrupt is supported.
         Trap::Interrupt(Interrupt::MachineTimer) => unsafe {
             let ticks = &mut TICKS;
             with_task_table(|tasks| safe_timer_handler(ticks, tasks));
         },
-        //
         // System Calls.
-        //
         Trap::Exception(Exception::UserEnvCall) => {
+            // Advance program counter past ecall instruction.
+            task.save_mut().pc = register::mepc::read() as u32 + 4;
             unsafe {
-                // Advance program counter past ecall instruction.
-                task.save_mut().pc = register::mepc::read() as u32 + 4;
                 asm!(
                     "
                     la a1, CURRENT_TASK_PTR
@@ -448,12 +457,11 @@ fn trap_handler(task: &mut task::Task) {
                     lw a1, (a1)             # arg1 = task ptr
                     jal syscall_entry
                     ",
+                    options(nostack),
                 );
             }
         }
-        //
-        // Exceptions.  Routed via the most appropriate FaultInfo.
-        //
+        // Exceptions. Routed via the most appropriate FaultInfo.
         Trap::Exception(Exception::IllegalInstruction) => unsafe {
             handle_fault(task, FaultInfo::IllegalInstruction);
         },
@@ -466,103 +474,86 @@ fn trap_handler(task: &mut task::Task) {
                 },
             );
         },
+        Trap::Exception(Exception::StoreFault) => unsafe {
+            handle_fault(
+                task,
+                FaultInfo::MemoryAccess {
+                    address: Some(register::mtval::read() as u32),
+                    source: FaultSource::User,
+                },
+            );
+        },
         Trap::Exception(Exception::InstructionFault) => unsafe {
             handle_fault(task, FaultInfo::IllegalText);
         },
         _ => {
-            klog!(
-                "Unimplemented cause 0b{:b}",
-                register::mcause::read().bits()
-            );
+            // Unknown trap - log and continue
+            // klog!("Unimplemented cause 0b{:b}", register::mcause::read().bits());
         }
     }
 }
 
 #[no_mangle]
 unsafe fn handle_fault(task: *mut task::Task, fault: FaultInfo) {
-    with_task_table(|tasks| {
-        let idx = (task as usize - tasks.as_ptr() as usize)
-            / core::mem::size_of::<task::Task>();
+    unsafe {
+        with_task_table(|tasks| {
+            let idx = (task as usize - tasks.as_ptr() as usize)
+                / core::mem::size_of::<task::Task>();
 
-        let next = match task::force_fault(tasks, idx, fault) {
-            task::NextTask::Specific(i) => i,
-            task::NextTask::Other => task::select(idx, tasks),
-            task::NextTask::Same => idx,
-        };
+            let next = match task::force_fault(tasks, idx, fault) {
+                task::NextTask::Specific(i) => &tasks[i],
+                task::NextTask::Other => task::select(idx, tasks),
+                task::NextTask::Same => &tasks[idx],
+            };
 
-        if next == idx {
-            panic!("attempt to return to Task #{} after fault", idx);
-        }
+            // Check if we're trying to return to the same faulted task
+            let next_ptr = next as *const task::Task;
+            let current_ptr = &tasks[idx] as *const task::Task;
+            if next_ptr == current_ptr {
+                panic!("attempt to return to Task #{} after fault", idx);
+            }
 
-        let next = &mut tasks[next];
-        apply_memory_protection(next);
-        set_current_task(next);
-    });
+            apply_memory_protection(next);
+            set_current_task(next);
+        });
+    }
 }
 
 // Timer handling.
 //
-// We currently only support single HART systems.  From reading elsewhere,
-// additional harts have their own mtimecmp offset at 0x8 intervals from hart0.
-//
-// As per FE310-G002 Manual, section 9.1, the address of mtimecmp on
-// our supported board is 0x0200_4000, which also matches qemu.
-//
-// On both RV32 and RV64 systems the mtime and mtimecmp memory-mapped registers
-// are 64-bits wide.
-//
+// TODO: These addresses are for the SiFive FE310 (HiFive RevB).
+// RP2350 uses a different timer peripheral at 0x400b0000.
 const MTIMECMP: u64 = 0x0200_4000;
 const MTIME: u64 = 0x0200_BFF8;
 
-// Configure the timer.
-//
-// RISC-V Privileged Architecture Manual
-// 3.2.1 Machine Timer Registers (mtime and mtimecmp)
-//
-// To keep things simple, especially on RV32 systems where we cannot atomically
-// write to the mtime/mtimecmp memory-mapped registers as they are 64 bits
-// wide, we only utilise the first 32-bits of each register, setting the
-// high-order bits to 0 on startup, and restarting the low-order bits of mtime
-// back to 0 on each interrupt.
-//
 #[no_mangle]
 unsafe fn set_timer(tick_divisor: u32) {
-    // Set high-order bits of mtime to zero.  We only call this function prior
-    // to enabling interrupts so it should be safe.
-    asm!("
-        li {0}, {mtimecmp}  # load mtimecmp address
-        li {1}, -1          # start with all low-order bits set
-        sw {1}, 0({0})      # set low-order bits -1
-        sw zero, 4({0})     # set high-order bits to 0
-        sw {2}, 0({0})      # set low-order bits to tick_divisor
+    unsafe {
+        asm!("
+            li {0}, {mtimecmp}  # load mtimecmp address
+            li {1}, -1          # start with all low-order bits set
+            sw {1}, 0({0})      # set low-order bits -1
+            sw zero, 4({0})     # set high-order bits to 0
+            sw {2}, 0({0})      # set low-order bits to tick_divisor
 
-        li {0}, {mtime}     # load mtime address
-        sw zero, 4({0})     # set high-order bits to 0
-        sw zero, 0({0})     # set low-order bits back to 0
-        ",
-        out(reg) _,
-        out(reg) _,
-        in(reg) tick_divisor,
-        mtime = const MTIME,
-        mtimecmp = const MTIMECMP,
-    );
+            li {0}, {mtime}     # load mtime address
+            sw zero, 4({0})     # set high-order bits to 0
+            sw zero, 0({0})     # set low-order bits back to 0
+            ",
+            out(reg) _,
+            out(reg) _,
+            in(reg) tick_divisor,
+            mtime = const MTIME,
+            mtimecmp = const MTIMECMP,
+        );
+    }
 }
 
 fn safe_timer_handler(ticks: &mut u64, tasks: &mut [task::Task]) {
-    // Advance the kernel's notion of time.
-    // This increment is not expected to overflow in a working system, since it
-    // would indicate that 2^64 ticks have passed, and ticks are expected to be
-    // in the range of nanoseconds to milliseconds -- meaning over 500 years.
-    // However, we do not use wrapping add here because, if we _do_ overflow due
-    // to e.g. memory corruption, we'd rather panic and reboot than attempt to
-    // limp forward.
     *ticks += 1;
-    // Now, give up mutable access to *ticks so there's no chance of a
-    // double-increment due to bugs below.
     let now = Timestamp::from(*ticks);
     drop(ticks);
 
-    // Process any timers.
     let switch = task::process_timers(tasks, now);
 
     if switch != task::NextTask::Same {
@@ -575,7 +566,6 @@ fn safe_timer_handler(ticks: &mut u64, tasks: &mut [task::Task]) {
                     / core::mem::size_of::<task::Task>();
 
                 let next = task::select(idx, tasks);
-                let next = &mut tasks[next];
                 apply_memory_protection(next);
                 set_current_task(next);
             });
@@ -583,18 +573,14 @@ fn safe_timer_handler(ticks: &mut u64, tasks: &mut [task::Task]) {
     }
 
     unsafe {
-        // Reset mtime back to 0.  In theory we could save an instruction on
-        // RV32 here and only write the low-order bits, assuming that it has
-        // been less than 12 seconds or so since our last interrupt(!), but
-        // let's avoid any possibility of a nasty surprise.
         core::ptr::write_volatile(MTIME as *mut u64, 0);
     }
 }
 
+/// Start the first task and begin executing.
 #[allow(unused_variables)]
 pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
-    // Configure MPP to switch us to User mode on exit from Machine
-    // mode (when we call "mret" below).
+    // Configure MPP to switch us to User mode on exit from Machine mode.
     unsafe {
         register::mstatus::set_mpp(MPP::User);
     }
@@ -605,14 +591,8 @@ pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
     // Configure the timer
     unsafe {
         CLOCK_FREQ_KHZ = tick_divisor;
-
-        // Reset mtime back to 0, set mtimecmp to chosen timer
         set_timer(tick_divisor - 1);
-
-        // Machine timer interrupt enable
         register::mie::set_mtimer();
-
-        // Global machine interrupt enable
         register::mstatus::set_mie();
     }
 
@@ -629,36 +609,25 @@ pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
     }
 }
 
-/// Manufacture a mutable/exclusive reference to the task table from thin air
-/// and hand it to `body`. This bypasses borrow checking and should only be used
-/// at kernel entry points, then passed around.
-///
-/// Because the lifetime of the reference passed into `body` is anonymous, the
-/// reference can't easily be stored, which is deliberate.
+/// Manufacture a mutable/exclusive reference to the task table from thin air.
 ///
 /// # Safety
 ///
-/// You can use this safely at kernel entry points, exactly once, to create a
-/// reference to the task table.
+/// Use at kernel entry points only.
 pub unsafe fn with_task_table<R>(
     body: impl FnOnce(&mut [task::Task]) -> R,
 ) -> R {
-    let tasks = core::slice::from_raw_parts_mut(
-        TASK_TABLE_BASE.expect("kernel not started").as_mut(),
-        TASK_TABLE_SIZE,
-    );
-    body(tasks)
+    unsafe {
+        let tasks = core::slice::from_raw_parts_mut(
+            TASK_TABLE_BASE.expect("kernel not started").as_mut(),
+            TASK_TABLE_SIZE,
+        );
+        body(tasks)
+    }
 }
 
-/// Manufacture a shared reference to the interrupt action table from thin air
-/// and hand it to `body`. This bypasses borrow checking and should only be used
-/// at kernel entry points, then passed around.
-///
-/// Because the lifetime of the reference passed into `body` is anonymous, the
-/// reference can't easily be stored, which is deliberate.
+/// Manufacture a shared reference to the interrupt action table from thin air.
 pub fn with_irq_table<R>(body: impl FnOnce(&[abi::Interrupt]) -> R) -> R {
-    // Safety: as long as a legit pointer was stored in IRQ_TABLE_BASE, or no
-    // pointer has been stored, we can do this safely.
     let table = unsafe {
         core::slice::from_raw_parts(
             IRQ_TABLE_BASE.expect("kernel not started").as_ptr(),
@@ -672,25 +641,70 @@ pub fn with_irq_table<R>(body: impl FnOnce(&[abi::Interrupt]) -> R) -> R {
 ///
 /// # Safety
 ///
-/// This records a pointer that aliases `task`. As long as you don't read that
-/// pointer except at syscall entry, you'll be okay.
-pub unsafe fn set_current_task(task: &mut task::Task) {
-    CURRENT_TASK_PTR = Some(NonNull::from(task));
+/// This records a pointer that aliases `task`.
+pub unsafe fn set_current_task(task: &task::Task) {
+    unsafe {
+        CURRENT_TASK_PTR = Some(NonNull::from(task).cast());
+    }
 }
-
-static mut TICKS: u64 = 0;
 
 /// Reads the tick counter.
 pub fn now() -> Timestamp {
     Timestamp::from(unsafe { TICKS })
 }
 
+/// Disable an IRQ. (Stub - external IRQs not yet implemented)
 #[allow(unused_variables)]
-pub fn disable_irq(n: u32) {}
+pub fn disable_irq(n: u32, also_clear_pending: bool) -> Result<(), UsageError> {
+    // TODO: implement IRQ control for RISC-V
+    Err(UsageError::NoIrq)
+}
 
+/// Enable an IRQ. (Stub - external IRQs not yet implemented)
 #[allow(unused_variables)]
-pub fn enable_irq(n: u32) {}
+pub fn enable_irq(n: u32, also_clear_pending: bool) -> Result<(), UsageError> {
+    // TODO: implement IRQ control for RISC-V
+    Err(UsageError::NoIrq)
+}
 
-// TODO: Constants that may change depending on configuration
-// The timer addresses below are hardcoded for FE310 (HiFive RevB).
-// RP2350 uses a different timer peripheral that needs to be configured here.
+/// Get IRQ status. (Stub - external IRQs not yet implemented)
+#[allow(unused_variables)]
+pub fn irq_status(n: u32) -> Result<abi::IrqStatus, UsageError> {
+    // TODO: implement IRQ status for RISC-V
+    Err(UsageError::NoIrq)
+}
+
+/// Trigger a software IRQ. (Stub - not yet implemented)
+#[allow(unused_variables)]
+pub fn pend_software_irq(InterruptNum(n): InterruptNum) -> Result<(), UsageError> {
+    // TODO: implement software IRQ triggering for RISC-V
+    Err(UsageError::NoIrq)
+}
+
+/// Set clock frequency. (Stub - used by startup)
+#[allow(unused_variables)]
+pub fn set_clock_freq(freq: u32) {
+    unsafe {
+        CLOCK_FREQ_KHZ = freq;
+    }
+}
+
+/// Reset the system. (Stub - not yet implemented)
+pub fn reset() -> ! {
+    // TODO: implement proper system reset for RP2350
+    panic!("system reset requested");
+}
+
+// RISC-V has atomic operations, so we can use the native swap.
+impl AtomicExt for AtomicBool {
+    type Primitive = bool;
+
+    #[inline(always)]
+    fn swap_polyfill(
+        &self,
+        value: Self::Primitive,
+        ordering: Ordering,
+    ) -> Self::Primitive {
+        self.swap(value, ordering)
+    }
+}
