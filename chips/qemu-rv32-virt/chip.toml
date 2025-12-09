@@ -1,0 +1,56 @@
+# QEMU RISC-V 32-bit virt machine peripheral definitions
+# Based on QEMU hw/riscv/virt.c memory map
+#
+# This is the reference RISC-V platform with standard CLINT and PLIC
+# interrupt controllers.
+
+# Core Local Interruptor (CLINT)
+# Provides machine timer (MTIME/MTIMECMP) and software interrupts (MSIP)
+# Standard SiFive CLINT layout
+[clint]
+address = 0x2000000
+size = 0x10000
+
+# Platform-Level Interrupt Controller (PLIC)
+# Handles external interrupts, distributes to harts
+[plic]
+address = 0xc000000
+size = 0x4000000
+
+# NS16550 compatible UART
+[uart0]
+address = 0x10000000
+size = 0x100
+
+# VirtIO MMIO devices (8 slots)
+[virtio0]
+address = 0x10001000
+size = 0x1000
+
+[virtio1]
+address = 0x10002000
+size = 0x1000
+
+[virtio2]
+address = 0x10003000
+size = 0x1000
+
+[virtio3]
+address = 0x10004000
+size = 0x1000
+
+[virtio4]
+address = 0x10005000
+size = 0x1000
+
+[virtio5]
+address = 0x10006000
+size = 0x1000
+
+[virtio6]
+address = 0x10007000
+size = 0x1000
+
+[virtio7]
+address = 0x10008000
+size = 0x1000

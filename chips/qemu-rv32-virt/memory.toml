@@ -1,0 +1,21 @@
+# QEMU RISC-V virt machine memory map
+#
+# The virt machine has configurable RAM starting at 0x80000000.
+# We'll use a modest 16MB for now (QEMU default is 128MB).
+# Flash is emulated as RAM since virt doesn't have real flash.
+
+# "Flash" region - actually RAM, but we treat it as read-only + execute
+# for code. QEMU virt loads firmware here.
+[[flash]]
+address = 0x80000000
+size = 0x200000  # 2MB for code
+read = true
+execute = true
+
+# RAM region - starts after flash
+[[ram]]
+address = 0x80200000
+size = 0xe00000  # 14MB for data
+read = true
+write = true
+execute = false

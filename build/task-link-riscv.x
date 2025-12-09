@@ -105,12 +105,11 @@ SECTIONS
     KEEP(*(.got .got.*));
   }
 
-  .eh_frame (INFO) : { KEEP(*(.eh_frame)) }
-  .eh_frame_hdr (INFO) : { *(.eh_frame_hdr) }
-
   /* ## Discarded sections */
   /DISCARD/ :
   {
     *(.riscv.attributes);
+    *(.eh_frame);
+    *(.eh_frame_hdr);
   }
 }

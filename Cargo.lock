@@ -786,9 +786,9 @@ dependencies = [
 
 [[package]]
 name = "critical-section"
-version = "1.1.2"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7059fff8937831a9ae6f0fe4d658ffabf58f2ca96aa9dec1c889f936f705f216"
+checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
 name = "crossbeam-utils"
@@ -3595,7 +3595,8 @@ dependencies = [
  "phash-gen",
  "proc-macro2",
  "quote",
- "riscv",
+ "riscv 0.11.1",
+ "riscv-peripheral",
  "riscv-rt",
  "ron",
  "serde",
@@ -4360,9 +4361,9 @@ checksum = "de96540e0ebde571dc55c73d60ef407c653844e6f9a1e2fdbd40c07b9252d812"
 
 [[package]]
 name = "paste"
-version = "1.0.6"
+version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0744126afe1a6dd7f394cb50a716dbe086cb06e255e53d8d0185d82828358fb5"
+checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "path-slash"
@@ -4409,7 +4410,7 @@ dependencies = [
  "build-util",
  "cfg-if",
  "kern",
- "riscv",
+ "riscv 0.11.1",
  "riscv-rt",
 ]
 
@@ -4612,6 +4613,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "qemu-rv32-virt"
+version = "0.1.0"
+dependencies = [
+ "build-util",
+ "cfg-if",
+ "kern",
+ "riscv 0.11.1",
+ "riscv-rt",
+]
+
+[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4788,12 +4800,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "riscv"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b05cfa3f7b30c84536a9025150d44d26b8e1cc20ddf436448d74cd9591eefb25"
+dependencies = [
+ "critical-section",
+ "embedded-hal 1.0.0",
+ "paste",
+ "riscv-macros",
+ "riscv-pac",
+]
+
+[[package]]
+name = "riscv-macros"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d323d13972c1b104aa036bc692cd08b822c8bbf23d79a27c526095856499799"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.106",
+]
+
+[[package]]
+name = "riscv-pac"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8188909339ccc0c68cfb5a04648313f09621e8b87dc03095454f1a11f6c5d436"
+
+[[package]]
+name = "riscv-peripheral"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "817eb3a5d25bf6a38281266578ed219a686b9d701033bf04724359fa989c2c4b"
+dependencies = [
+ "embedded-hal 1.0.0",
+ "paste",
+ "riscv 0.15.0",
+ "riscv-pac",
+]
+
+[[package]]
 name = "riscv-rt"
 version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0d35e32cf1383183e8885d8a9aa4402a087fd094dc34c2cb6df6687d0229dfe"
 dependencies = [
- "riscv",
+ "riscv 0.11.1",
  "riscv-rt-macros",
 ]
 
@@ -5889,7 +5943,7 @@ name = "task-idle"
 version = "0.1.0"
 dependencies = [
  "cortex-m",
- "riscv",
+ "riscv 0.11.1",
  "userlib",
 ]
 

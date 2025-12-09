@@ -519,34 +519,29 @@ unsafe fn handle_fault(task: *mut task::Task, fault: FaultInfo) {
     }
 }
 
-// Timer handling.
+// Timer handling via CLINT (Core Local Interruptor).
 //
-// TODO: These addresses are for the SiFive FE310 (HiFive RevB).
-// RP2350 uses a different timer peripheral at 0x400b0000.
-const MTIMECMP: u64 = 0x0200_4000;
-const MTIME: u64 = 0x0200_BFF8;
+// We use riscv-peripheral for safe register access. The CLINT provides:
+//   - MSIP (software interrupt) at offset 0x0000
+//   - MTIMECMP at offset 0x4000
+//   - MTIME at offset 0xBFF8
+//
+// QEMU virt machine uses standard CLINT at 0x0200_0000.
+// TODO: Make this configurable per-chip.
 
-#[no_mangle]
-unsafe fn set_timer(tick_divisor: u32) {
-    unsafe {
-        asm!("
-            li {0}, {mtimecmp}  # load mtimecmp address
-            li {1}, -1          # start with all low-order bits set
-            sw {1}, 0({0})      # set low-order bits -1
-            sw zero, 4({0})     # set high-order bits to 0
-            sw {2}, 0({0})      # set low-order bits to tick_divisor
+riscv_peripheral::clint_codegen!(
+    CLINT,
+    base 0x0200_0000,
+    mtime_freq 10_000_000  // QEMU virt runs at 10MHz
+);
 
-            li {0}, {mtime}     # load mtime address
-            sw zero, 4({0})     # set high-order bits to 0
-            sw zero, 0({0})     # set low-order bits back to 0
-            ",
-            out(reg) _,
-            out(reg) _,
-            in(reg) tick_divisor,
-            mtime = const MTIME,
-            mtimecmp = const MTIMECMP,
-        );
-    }
+fn set_timer(tick_divisor: u32) {
+    let clint = CLINT::new();
+    let mtimer = clint.mtimer();
+    // Set compare value first, then reset counter
+    // Hart 0's MTIMECMP is at offset 0 from the MTIMECMP base
+    mtimer.mtimecmp_mhartid().write(tick_divisor as u64);
+    mtimer.mtime().write(0);
 }
 
 fn safe_timer_handler(ticks: &mut u64, tasks: &mut [task::Task]) {
@@ -572,9 +567,8 @@ fn safe_timer_handler(ticks: &mut u64, tasks: &mut [task::Task]) {
         }
     }
 
-    unsafe {
-        core::ptr::write_volatile(MTIME as *mut u64, 0);
-    }
+    // Reset timer for next tick
+    CLINT::new().mtimer().mtime().write(0);
 }
 
 /// Start the first task and begin executing.

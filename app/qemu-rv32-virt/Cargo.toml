@@ -1,0 +1,23 @@
+[package]
+edition = "2021"
+name = "qemu-rv32-virt"
+version = "0.1.0"
+
+[dependencies]
+cfg-if = { workspace = true }
+riscv = { version = "0.11", features = ["critical-section-single-hart"] }
+riscv-rt = { version = "0.12" }
+
+kern = { path = "../../sys/kern", default-features = false }
+
+[build-dependencies]
+build-util = { path = "../../build/util" }
+
+[[bin]]
+name = "qemu-rv32-virt"
+test = false
+doctest = false
+bench = false
+
+[lints]
+workspace = true

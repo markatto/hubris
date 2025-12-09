@@ -1,0 +1,2 @@
+# QEMU RISC-V 32-bit virt machine
+# Run with: qemu-system-riscv32 -machine virt -nographic -kernel target/qemu-rv32-virt/dist/default/final.elf
