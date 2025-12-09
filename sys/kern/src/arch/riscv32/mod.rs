@@ -432,10 +432,14 @@ fn trap_handler(task: &mut task::Task) {
     let trap: Result<Trap<Interrupt, Exception>, _> = raw_trap.try_into();
 
     match trap {
-        // Interrupts. Only our periodic MachineTimer interrupt is supported.
+        // Timer interrupt - periodic tick for scheduling
         Ok(Trap::Interrupt(Interrupt::MachineTimer)) => unsafe {
             let ticks = &mut TICKS;
             with_task_table(|tasks| safe_timer_handler(ticks, tasks));
+        },
+        // External interrupt - hardware IRQs via PLIC
+        Ok(Trap::Interrupt(Interrupt::MachineExternal)) => {
+            handle_external_interrupt();
         },
         // System Calls.
         Ok(Trap::Exception(Exception::UserEnvCall)) => {
@@ -482,6 +486,59 @@ fn trap_handler(task: &mut task::Task) {
             // Unknown/unhandled trap
             // TODO: Consider logging via klog! when debugging
         }
+    }
+}
+
+/// Handle external interrupts from the PLIC.
+///
+/// This is called when the CPU receives a MachineExternal interrupt.
+/// We claim the interrupt from the PLIC, look up the owning task,
+/// disable the interrupt (task re-enables via syscall), post a
+/// notification to the task, and complete the interrupt.
+fn handle_external_interrupt() {
+    use irq::InterruptController;
+
+    // Claim the interrupt from the PLIC - returns the IRQ number
+    let Some(irq_num) = IRQ.claim() else {
+        // Spurious interrupt, no pending IRQ
+        return;
+    };
+
+    // Look up which task owns this IRQ
+    let owner = crate::startup::HUBRIS_IRQ_TASK_LOOKUP
+        .get(abi::InterruptNum(irq_num))
+        .unwrap_or_else(|| panic!("unhandled IRQ {irq_num}"));
+
+    let switch = with_task_table(|tasks| {
+        // Disable the IRQ - task will re-enable via sys_irq_control
+        // Ignore errors since the IRQ number is valid (we just claimed it)
+        let _ = IRQ.disable(irq_num);
+
+        // Post notification to the owning task
+        let n = task::NotificationSet(owner.notification);
+        tasks[owner.task as usize].post(n)
+    });
+
+    // Complete the interrupt so PLIC can deliver the next one
+    IRQ.complete(irq_num);
+
+    // If posting the notification woke a higher-priority task, switch to it
+    if switch {
+        with_task_table(|tasks| {
+            let current = unsafe {
+                CURRENT_TASK_PTR
+                    .expect("irq before kernel started?")
+                    .as_ptr()
+            };
+            let idx = (current as usize - tasks.as_ptr() as usize)
+                / core::mem::size_of::<task::Task>();
+
+            let next = task::select(idx, tasks);
+            apply_memory_protection(next);
+            unsafe {
+                set_current_task(next);
+            }
+        });
     }
 }
 
@@ -579,10 +636,18 @@ pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
         CLOCK_FREQ_KHZ = tick_divisor;
     }
     TIMER.init(tick_divisor);
+
+    // Initialize the interrupt controller (PLIC)
+    // This sets threshold to 0 and enables machine external interrupts
+    IRQ.init();
+
     unsafe {
         register::mie::set_mtimer();
         register::mstatus::set_mie();
     }
+
+    // Apply memory protection for the first task
+    apply_memory_protection(task);
 
     klog!("  launching task");
 

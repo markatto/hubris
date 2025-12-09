@@ -24,6 +24,8 @@ stacksize = 512
 start = true
 uses = ["uart0"]
 extern-regions = ["uart0"]
+notifications = ["uart-irq"]
+interrupts = {"uart0.irq" = "uart-irq"}
 
 [tasks.hello]
 name = "task-hello"
