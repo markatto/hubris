@@ -2115,12 +2115,18 @@ fn build(
             );
             output
         });
+    // --force-dwarf-frame-section: The LLVM RISC-V backend does not emit
+    // .debug_frame by default (only .eh_frame, which is stripped in no_std).
+    // Humility requires .debug_frame for stack unwinding, so we force its
+    // emission. This flag is a no-op on ARM where .debug_frame is already
+    // emitted.
     cmd.env(
         "RUSTFLAGS",
         format!(
             "-C link-arg=-z -C link-arg=common-page-size=0x20 \
              -C link-arg=-z -C link-arg=max-page-size=0x20 \
              -C llvm-args=--enable-machine-outliner=never \
+             -C llvm-args=--force-dwarf-frame-section \
              -Z emit-stack-sizes \
              -C overflow-checks=y \
              -C metadata={} \
