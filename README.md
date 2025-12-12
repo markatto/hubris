@@ -1,4 +1,6 @@
-# RISC-V Port Status
+# Hubris RISC-V Port
+
+Fork of [Hubris](https://github.com/oxidecomputer/hubris) with RISC-V support.
 
 ## What Works
 
