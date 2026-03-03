@@ -1,0 +1,190 @@
+= RISC-V Memory Protection (PMP)
+
+This document describes how Hubris uses the RISC-V Physical Memory Protection
+(PMP) mechanism for task isolation, how it compares to the ARM MPU
+implementation, and what differs across the three RISC-V targets we intend to
+support: QEMU virt, RP2350 (Hazard3), and ESP32-C3.
+
+Reference datasheets are stashed in `doc/reference/`.
+
+== Overview
+
+On RISC-V, the kernel runs in Machine mode (M-mode) and tasks run in User mode
+(U-mode). PMP entries restrict what U-mode code can access. M-mode is
+unrestricted by default (unless the Lock bit is set on a PMP entry, which we do
+not use). This is analogous to ARM's PRIVDEFENA bit, which gives the kernel
+default access to the full memory map.
+
+Each task gets up to 8 memory regions (`REGIONS_PER_TASK` in
+`sys/kern/src/descs.rs`), shared as a compile-time constant with the ARM port.
+Region 0 is always the null region (no access, base 0, size 32), catching null
+pointer dereferences. The remaining 7 slots hold the task's flash, RAM,
+peripheral MMIO regions, and any shared regions like caboose or extratext.
+
+PMP register values (`pmpaddr` and `pmpcfg`) are pre-computed at build time by
+`compute_region_extension_data()` in `sys/kern/src/arch/riscv32/mod.rs` and
+stored in the static region descriptor table in flash. Context switches just
+copy these values to the PMP CSRs -- no runtime computation.
+
+== NAPOT Encoding
+
+All three targets support NAPOT (Naturally Aligned Power-Of-Two) mode. This
+requires regions to be power-of-two sized and naturally aligned (base is a
+multiple of size). The build system enforces this via `MpuAlignment::PowerOfTwo`
+in `build/xtask/src/config.rs`.
+
+NAPOT encodes both base address and size into a single `pmpaddr` CSR value.
+Per the RISC-V privileged spec (Table 19):
+
+  pmpaddr pattern         | Region size
+  yyyy...yyyy  (A=NA4)    | 4 bytes
+  yyyy...yyy0  (A=NAPOT)  | 8 bytes
+  yyyy...yy01             | 16 bytes
+  yyyy...y011             | 32 bytes
+  ...                     | ...
+
+The number of trailing 1-bits (G) determines size = 2^(G+3) bytes. Since
+`pmpaddr` stores `address[33:2]` (the physical address right-shifted by 2),
+the encoding formula is:
+
+  pmpaddr = (base >> 2) | ((size >> 3) - 1)
+
+where `(size >> 3) - 1` produces exactly G trailing 1-bits for a region of
+`size` bytes.
+
+== Comparison with ARM MPU
+
+The ARM and RISC-V memory protection implementations follow the same
+architecture in Hubris:
+
+[cols="1,2,2"]
+|===
+| Aspect | ARM MPU | RISC-V PMP
+
+| Entries per task
+| 8 (shared `REGIONS_PER_TASK`)
+| 8 (same constant)
+
+| Size constraint
+| Power-of-two + aligned (v6/v7), 32-byte chunks (v8)
+| Power-of-two + naturally aligned (NAPOT)
+
+| Precomputed values
+| `rbar`/`rasr` (v7) or `rbar`/`rlar`/`mair` (v8)
+| `pmpaddr`/`pmpcfg`
+
+| Context switch
+| Disable MPU -> write 8 regions -> re-enable
+| Clear pmpcfg -> write 8 pmpaddr + 2 pmpcfg
+
+| Kernel access
+| PRIVDEFENA: default memory map for privileged code
+| M-mode unrestricted (no L-bit set)
+
+| Stack overflow
+| Hardware MSTKERR flag in MemManage fault
+| No dedicated detection; overflow hits PMP guard and reports as MemoryAccess
+
+| Cache/memory attributes
+| TEX/SCB (v7) or MAIR (v8) control caching
+| Not applicable on QEMU virt; see target notes below
+
+| Default deny
+| MPU denies unprivileged access to unmatched addresses
+| PMP denies U-mode access to unmatched addresses (when any entry is active)
+|===
+
+The key architectural difference is stack overflow detection. ARM's exception
+stacking mechanism generates a distinct MSTKERR fault when the stack pointer
+is invalid, which Hubris maps to `FaultInfo::StackOverflow`. On RISC-V, a
+stack overflow simply hits the PMP boundary (or an adjacent region) and
+produces a generic LoadFault/StoreFault, reported as `FaultInfo::MemoryAccess`.
+The faulting address (from `mtval`) will be near the stack limit, but there is
+no distinct fault type. This is acceptable -- the supervisor still gets
+notified and can restart the task.
+
+== Target Differences
+
+All three RISC-V targets we plan to support use PMP with NAPOT, but they
+differ in entry count, granularity, and peripheral controllers.
+
+=== QEMU virt (current development target)
+
+- **PMP entries:** 16 (we use 8)
+- **Granule:** 4 bytes
+- **Modes:** NAPOT, TOR, NA4
+- **IRQ controller:** Standard PLIC at 0x0C00_0000
+- **Timer:** Standard CLINT at 0x0200_0000 (10 MHz mtime)
+- **Memory attributes:** Not modeled; all memory is "normal"
+
+This is the reference platform. No special considerations.
+
+=== RP2350 / Hazard3 (Raspberry Pi Pico 2)
+
+- **PMP entries:** 8 (exactly matches `REGIONS_PER_TASK`)
+- **Granule:** 32 bytes (minimum NAPOT region is 32 bytes)
+- **Modes:** NAPOT only (no TOR, no NA4)
+- **IRQ controller:** Xh3irq (custom Hazard3 interrupt controller with
+  nested, prioritized IRQ support via `meinext`/`meipa` CSRs). Not
+  PLIC-compatible. Needs a new `InterruptController` implementation.
+- **Timer:** Standard CLINT (existing `ClintTimer` should work, but the base
+  address must be configurable -- currently hardcoded to QEMU's 0x0200_0000)
+- **Custom extensions:**
+  * Xh3pmpm: Adds `PMPCFGM0` CSR that enforces PMP in M-mode _without_
+    locking. Useful for kernel stack guarding or trap-and-emulate of
+    peripheral accesses. Standard PMP Lock bit (`L`) makes entries permanent
+    until reset; Xh3pmpm avoids that.
+  * Xh3power: `msleep` CSR controls WFI sleep depth. `h3.block`/`h3.unblock`
+    hint instructions. Could help with the idle task power issue.
+
+**Key constraint:** The 32-byte granule means `(size >> 3) - 1` must produce
+at least 0 trailing 1-bits, i.e. minimum size is 8 bytes from NAPOT's
+perspective, but the hardware rounds up to 32 bytes. Our existing minimum
+region size (32 bytes for the null region) already satisfies this. No code
+changes needed for granularity.
+
+**Key constraint:** Only 8 PMP entries, no headroom. Every region slot matters.
+Tasks with many peripherals may not fit. The build system already handles this
+via `spare_regions` calculation in `dist.rs`.
+
+=== ESP32-C3
+
+- **PMP entries:** 16 (we use 8; headroom available)
+- **Granule:** 4 bytes
+- **Modes:** NAPOT, TOR, NA4
+- **IRQ controller:** Custom interrupt matrix (INTC) with 31 vectored
+  interrupts, programmable priority and threshold. Neither PLIC nor Xh3irq.
+  Needs a third `InterruptController` implementation.
+- **Timer:** Custom SYSTIMER peripheral (not CLINT). Needs a new `SysTimer`
+  implementation.
+- **Memory map:** Split IRAM (0x4000_0000) / DRAM (0x3800_0000) with
+  different address ranges for instruction and data access to the same
+  physical SRAM. This is unusual and may require care in region assignment.
+
+**Key constraint:** The split IRAM/DRAM address map means a task's code and
+data live at different virtual addresses even though they map to the same
+physical SRAM. The build system and linker scripts would need to account for
+this -- a task's flash region (code) and RAM region (data) would be in
+completely different address ranges.
+
+== What This Means for Implementation
+
+The PMP encoding and context switch code is architecture-generic across all
+three targets -- NAPOT encoding works the same way, and the `pmpcfg`/`pmpaddr`
+CSRs are standard. The differences are all in the _peripherals_ around the
+core:
+
+1. **IRQ controllers** are already abstracted via the `InterruptController`
+   trait in `sys/kern/src/arch/riscv32/irq.rs`. Adding RP2350 and ESP32-C3
+   means writing new trait implementations, selected by cargo features.
+
+2. **Timers** are already abstracted via the `SysTimer` trait in
+   `sys/kern/src/arch/riscv32/timer.rs`. Same story.
+
+3. **Base addresses** for CLINT/PLIC are currently hardcoded. These need to
+   become configurable (either via cargo features or by reading from
+   `chip.toml` at build time).
+
+4. **The PMP code itself** (`compute_region_extension_data`,
+   `apply_memory_protection`) should work unchanged across all three targets
+   once the NAPOT encoding bug is fixed.

@@ -104,9 +104,15 @@ pub const fn compute_region_extension_data(
     size: u32,
     attributes: RegionAttributes,
 ) -> RegionDescExt {
-    // NAPOT encoding requires power-of-two aligned regions
-    // pmpaddr = (base >> 2) | ((size >> 1) - 1)
-    let pmpaddr = (base >> 2) | ((size >> 1).wrapping_sub(1));
+    // NAPOT encoding requires power-of-two aligned regions.
+    //
+    // pmpaddr stores address[33:2] (physical address >> 2).
+    // In NAPOT mode, G trailing 1-bits encode region size = 2^(G+3).
+    // For a region of `size` bytes: G = log2(size) - 3, so the
+    // mask of trailing 1s is (size >> 3) - 1.
+    //
+    // See RISC-V Privileged Spec, Table 19.
+    let pmpaddr = (base >> 2) | ((size >> 3).wrapping_sub(1));
 
     // Build pmpcfg byte: R=bit0, W=bit1, X=bit2, A=bits[4:3]
     // NAPOT mode = 0b11 in A field
