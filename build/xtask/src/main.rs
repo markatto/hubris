@@ -25,6 +25,7 @@ mod graph;
 mod humility;
 mod lsp;
 mod print;
+mod qemu;
 mod sizes;
 mod task_slot;
 
@@ -208,6 +209,18 @@ enum Xtask {
         /// Print the expanded configuration
         #[clap(long)]
         expanded_config: bool,
+    },
+
+    /// Runs `xtask dist` then launches QEMU for emulator targets.
+    Qemu {
+        /// Path to the image configuration file, in TOML.
+        cfg: PathBuf,
+        /// Start paused with a GDB server on port 1234.
+        #[clap(long)]
+        gdb: bool,
+        /// Do not rebuild before launching.
+        #[clap(long, short)]
+        norebuild: bool,
     },
 
     /// Print a JSON blob with configuration info for `rust-analyzer`
@@ -429,6 +442,25 @@ fn run(xtask: Xtask) -> Result<()> {
                 })?;
             }
             humility::run(&args, &[], Some("test"), false, image_name)?;
+        }
+        Xtask::Qemu {
+            cfg,
+            gdb,
+            norebuild,
+        } => {
+            let toml = Config::from_file(&cfg)?;
+            let image_name = &toml.image_names[0];
+            if !norebuild {
+                dist::package(
+                    false,
+                    false,
+                    &cfg,
+                    None,
+                    false,
+                    CabooseArgs::default(),
+                )?;
+            }
+            qemu::run(&toml, image_name, gdb)?;
         }
         Xtask::Clippy {
             verbose,
