@@ -7,6 +7,12 @@ hubris.testout.*
 .#*
 .gdb_history
 
+# reference PDFs (downloaded, not ours to redistribute)
+doc/reference/*.pdf
+
+# Claude Code project instructions
+CLAUDE.md
+
 # editor files
 .vscode/*
 !.vscode/*.md

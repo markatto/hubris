@@ -1,0 +1,23 @@
+= Reference Documents
+
+PDFs in this directory are gitignored. Download them with:
+
+  curl -L -o riscv-privileged-20241017.pdf \
+    "https://tools.cloudbear.ru/docs/riscv-privileged-1.13-20241017.pdf"
+
+  curl -L -o rp2350-datasheet.pdf \
+    "https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf"
+
+  curl -L -o esp32-c3-technical-reference.pdf \
+    "https://cdn.sparkfun.com/assets/9/1/2/7/8/esp32-c3_technical_reference_manual_en.pdf"
+
+== Sources
+
+RISC-V Privileged Specification v1.13 (October 2024)::
+  https://riscv.org/specifications/ratified/
+
+RP2350 Datasheet (Raspberry Pi Pico 2 / Hazard3)::
+  https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf
+
+ESP32-C3 Technical Reference Manual v1.0::
+  https://www.espressif.com/en/support/documents/technical-documents
