@@ -440,7 +440,7 @@ fn trap_handler(task: &mut task::Task) {
         // External interrupt - hardware IRQs via PLIC
         Ok(Trap::Interrupt(Interrupt::MachineExternal)) => {
             handle_external_interrupt();
-        },
+        }
         // System Calls.
         Ok(Trap::Exception(Exception::UserEnvCall)) => {
             // Advance program counter past ecall instruction.
@@ -461,7 +461,12 @@ fn trap_handler(task: &mut task::Task) {
         Ok(Trap::Exception(Exception::IllegalInstruction)) => unsafe {
             handle_fault(task, FaultInfo::IllegalInstruction);
         },
-        Ok(Trap::Exception(Exception::LoadFault)) => unsafe {
+        Ok(Trap::Exception(Exception::Breakpoint)) => unsafe {
+            // ebreak in user code with no debugger attached
+            handle_fault(task, FaultInfo::IllegalInstruction);
+        },
+        Ok(Trap::Exception(Exception::LoadFault))
+        | Ok(Trap::Exception(Exception::StoreFault)) => unsafe {
             handle_fault(
                 task,
                 FaultInfo::MemoryAccess {
@@ -470,7 +475,8 @@ fn trap_handler(task: &mut task::Task) {
                 },
             );
         },
-        Ok(Trap::Exception(Exception::StoreFault)) => unsafe {
+        Ok(Trap::Exception(Exception::LoadPageFault))
+        | Ok(Trap::Exception(Exception::StorePageFault)) => unsafe {
             handle_fault(
                 task,
                 FaultInfo::MemoryAccess {
@@ -479,13 +485,41 @@ fn trap_handler(task: &mut task::Task) {
                 },
             );
         },
-        Ok(Trap::Exception(Exception::InstructionFault)) => unsafe {
+        Ok(Trap::Exception(Exception::InstructionFault))
+        | Ok(Trap::Exception(Exception::InstructionPageFault)) => unsafe {
             handle_fault(task, FaultInfo::IllegalText);
         },
-        _ => {
-            // Unknown/unhandled trap
-            // TODO: Consider logging via klog! when debugging
-        }
+        Ok(Trap::Exception(Exception::InstructionMisaligned))
+        | Ok(Trap::Exception(Exception::LoadMisaligned))
+        | Ok(Trap::Exception(Exception::StoreMisaligned)) => unsafe {
+            handle_fault(
+                task,
+                FaultInfo::BusError {
+                    address: Some(register::mtval::read() as u32),
+                    source: FaultSource::User,
+                },
+            );
+        },
+        Ok(Trap::Exception(Exception::SupervisorEnvCall))
+        | Ok(Trap::Exception(Exception::MachineEnvCall)) => unsafe {
+            // Should never happen from user mode.
+            handle_fault(
+                task,
+                FaultInfo::InvalidOperation(
+                    register::mcause::read().bits() as u32
+                ),
+            );
+        },
+        _ => unsafe {
+            // Unknown or unrecognized trap — fault the task with the
+            // raw mcause so it shows up in diagnostics.
+            handle_fault(
+                task,
+                FaultInfo::InvalidOperation(
+                    register::mcause::read().bits() as u32
+                ),
+            );
+        },
     }
 }
 
@@ -647,7 +681,9 @@ pub fn start_first_task(tick_divisor: u32, task: &task::Task) -> ! {
     let entry = task.save().pc as usize;
     klog!("  entry={:#x} sp={:#x}", entry, task.save().sp);
     // Safety: Writing mepc to set the task entry point before mret
-    unsafe { register::mepc::write(entry); }
+    unsafe {
+        register::mepc::write(entry);
+    }
 
     // Configure the timer
     unsafe {
@@ -759,7 +795,9 @@ pub fn irq_status(n: u32) -> Result<abi::IrqStatus, UsageError> {
 /// - Xh3irq (RP2350) or ESP32-C3 may have different capabilities
 /// - Could bypass interrupt path and directly set task notification bits
 #[allow(unused_variables)]
-pub fn pend_software_irq(InterruptNum(n): InterruptNum) -> Result<(), UsageError> {
+pub fn pend_software_irq(
+    InterruptNum(n): InterruptNum,
+) -> Result<(), UsageError> {
     Err(UsageError::NoIrq)
 }
 
