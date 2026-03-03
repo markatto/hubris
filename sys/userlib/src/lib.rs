@@ -360,7 +360,12 @@ pub(crate) struct RawRecvMessage {
 #[inline(always)]
 pub fn sys_reply(peer: TaskId, code: u32, message: &[u8]) {
     unsafe {
-        crate::arch::sys_reply_stub(peer.0 as u32, code, message.as_ptr(), message.len())
+        crate::arch::sys_reply_stub(
+            peer.0 as u32,
+            code,
+            message.as_ptr(),
+            message.len(),
+        )
     }
 }
 
@@ -463,7 +468,11 @@ pub fn sys_borrow_info(lender: TaskId, index: usize) -> Option<BorrowInfo> {
 
     let mut raw = MaybeUninit::<RawBorrowInfo>::uninit();
     unsafe {
-        crate::arch::sys_borrow_info_stub(lender.0 as u32, index, raw.as_mut_ptr());
+        crate::arch::sys_borrow_info_stub(
+            lender.0 as u32,
+            index,
+            raw.as_mut_ptr(),
+        );
     }
     // Safety: stub completely initializes record
     let raw = unsafe { raw.assume_init() };
@@ -767,7 +776,8 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
 
 #[inline(always)]
 pub fn sys_refresh_task_id(task_id: TaskId) -> TaskId {
-    let tid = unsafe { crate::arch::sys_refresh_task_id_stub(task_id.0 as u32) };
+    let tid =
+        unsafe { crate::arch::sys_refresh_task_id_stub(task_id.0 as u32) };
     TaskId(tid as u16)
 }
 
@@ -778,7 +788,9 @@ pub fn sys_post(task_id: TaskId, bits: u32) -> u32 {
 
 #[inline(always)]
 pub fn sys_reply_fault(task_id: TaskId, reason: ReplyFaultReason) {
-    unsafe { crate::arch::sys_reply_fault_stub(task_id.0 as u32, reason as u32) }
+    unsafe {
+        crate::arch::sys_reply_fault_stub(task_id.0 as u32, reason as u32)
+    }
 }
 
 /// Returns the current status of any interrupts mapped to the provided

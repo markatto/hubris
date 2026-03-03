@@ -32,4 +32,4 @@ qemu-system-riscv32 -machine virt -nographic -bios none \
 ## What Needs Work
 
 - `humility tasks` has ARM-specific SavedState references
-- Timer/irq support for actual hardware (all currently available hardware uses custom implementations; plan on supporting at least rp2350 and esp32-c3.
+- Timer/irq support for actual hardware (all currently available hardware uses custom implementations; plan on supporting at least rp2350 and esp32-c3)

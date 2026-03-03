@@ -16,7 +16,8 @@ const CYCLES_PER_MS: u32 = 10_000;
 fn main() -> ! {
     #[cfg(feature = "klog-semihosting")]
     {
-        let _ = riscv_semihosting::hprintln!("Hubris starting on QEMU rv32 virt");
+        let _ =
+            riscv_semihosting::hprintln!("Hubris starting on QEMU rv32 virt");
     }
 
     unsafe { kern::startup::start_kernel(CYCLES_PER_MS) }

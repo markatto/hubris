@@ -279,10 +279,7 @@ pub(crate) unsafe extern "C" fn sys_borrow_info_stub(
 ///
 /// See the note on syscall stubs at the top of the lib module for rationale.
 #[unsafe(naked)]
-pub(crate) unsafe extern "C" fn sys_irq_control_stub(
-    _mask: u32,
-    _enable: u32,
-) {
+pub(crate) unsafe extern "C" fn sys_irq_control_stub(_mask: u32, _enable: u32) {
     arch::naked_asm!("
         # Load the constant syscall number.
         li a7, {sysnum}
@@ -398,10 +395,7 @@ pub(crate) unsafe extern "C" fn sys_post_stub(_tid: u32, _mask: u32) -> u32 {
 ///
 /// See the note on syscall stubs at the top of the lib module for rationale.
 #[unsafe(naked)]
-pub(crate) unsafe extern "C" fn sys_reply_fault_stub(
-    _tid: u32,
-    _reason: u32,
-) {
+pub(crate) unsafe extern "C" fn sys_reply_fault_stub(_tid: u32, _reason: u32) {
     arch::naked_asm!("
         # Load the constant syscall number.
         li a7, {sysnum}

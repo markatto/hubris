@@ -23,8 +23,8 @@ fn main() -> ! {
     let (rc, _) = sys_send(
         uart,
         OP_WRITE,
-        &[],         // no fixed payload
-        &mut [],     // no response expected
+        &[],     // no fixed payload
+        &mut [], // no response expected
         &[Lease::read_only(msg)],
     );
 

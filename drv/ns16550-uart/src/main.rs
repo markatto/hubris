@@ -28,7 +28,10 @@
 #![no_std]
 #![no_main]
 
-use ns16550a::{Divisor, Uart, WordLength, StopBits, ParityBit, ParitySelect, StickParity, Break, DMAMode};
+use ns16550a::{
+    Break, DMAMode, Divisor, ParityBit, ParitySelect, StickParity, StopBits,
+    Uart, WordLength,
+};
 use userlib::*;
 
 // UART base address - provided by linker from extern-regions config
@@ -37,17 +40,17 @@ extern "C" {
 }
 
 // NS16550 register offsets
-const IER_OFFSET: usize = 1;  // Interrupt Enable Register
-const IIR_OFFSET: usize = 2;  // Interrupt Identification Register
-const LSR_OFFSET: usize = 5;  // Line Status Register
+const IER_OFFSET: usize = 1; // Interrupt Enable Register
+const IIR_OFFSET: usize = 2; // Interrupt Identification Register
+const LSR_OFFSET: usize = 5; // Line Status Register
 
 // IER bits
-const IER_RX_AVAIL: u8 = 0x01;  // Enable Received Data Available interrupt
-const IER_TX_EMPTY: u8 = 0x02;  // Enable Transmitter Holding Register Empty interrupt
+const IER_RX_AVAIL: u8 = 0x01; // Enable Received Data Available interrupt
+const IER_TX_EMPTY: u8 = 0x02; // Enable Transmitter Holding Register Empty interrupt
 
 // LSR bits
-const LSR_DATA_READY: u8 = 0x01;  // Data Ready
-const LSR_THR_EMPTY: u8 = 0x20;  // Transmitter Holding Register Empty
+const LSR_DATA_READY: u8 = 0x01; // Data Ready
+const LSR_THR_EMPTY: u8 = 0x20; // Transmitter Holding Register Empty
 
 // RX buffer size
 const RX_BUF_SIZE: usize = 64;
@@ -136,7 +139,9 @@ impl UartRegs {
     }
 
     fn read_lsr(&self) -> u8 {
-        unsafe { core::ptr::read_volatile((self.base + LSR_OFFSET) as *const u8) }
+        unsafe {
+            core::ptr::read_volatile((self.base + LSR_OFFSET) as *const u8)
+        }
     }
 
     fn read_data(&self) -> u8 {
@@ -148,11 +153,15 @@ impl UartRegs {
     }
 
     fn write_ier(&self, val: u8) {
-        unsafe { core::ptr::write_volatile((self.base + IER_OFFSET) as *mut u8, val) }
+        unsafe {
+            core::ptr::write_volatile((self.base + IER_OFFSET) as *mut u8, val)
+        }
     }
 
     fn read_ier(&self) -> u8 {
-        unsafe { core::ptr::read_volatile((self.base + IER_OFFSET) as *const u8) }
+        unsafe {
+            core::ptr::read_volatile((self.base + IER_OFFSET) as *const u8)
+        }
     }
 
     fn enable_rx_interrupt(&self) {
@@ -231,18 +240,28 @@ fn main() -> ! {
                     // The NS16550 has a 16-byte TX FIFO
                     if let Some(txs) = txref.as_mut() {
                         while regs.thr_empty() && txs.pos < txs.len {
-                            if let Some(byte) = txs.caller.borrow(0).read_at::<u8>(txs.pos) {
+                            if let Some(byte) =
+                                txs.caller.borrow(0).read_at::<u8>(txs.pos)
+                            {
                                 regs.write_data(byte);
                                 txs.pos += 1;
                             } else {
                                 // Failed to read from lease
                                 regs.disable_tx_interrupt();
-                                txref.take().unwrap().caller.reply_fail(ResponseCode::BadArg);
+                                txref
+                                    .take()
+                                    .unwrap()
+                                    .caller
+                                    .reply_fail(ResponseCode::BadArg);
                                 break;
                             }
                         }
                         // Check if transmission is complete
-                        if txref.as_ref().map(|t| t.pos >= t.len).unwrap_or(false) {
+                        if txref
+                            .as_ref()
+                            .map(|t| t.pos >= t.len)
+                            .unwrap_or(false)
+                        {
                             regs.disable_tx_interrupt();
                             txref.take().unwrap().caller.reply(());
                         }
@@ -278,7 +297,9 @@ fn main() -> ! {
                     // Send the first byte immediately to kick off TX
                     // The NS16550 TX empty interrupt fires when THR transitions
                     // from full to empty, so we need to prime it
-                    let first_byte = caller.borrow(0).read_at::<u8>(0)
+                    let first_byte = caller
+                        .borrow(0)
+                        .read_at::<u8>(0)
                         .ok_or(ResponseCode::BadArg)?;
                     regs.write_data(first_byte);
 
@@ -316,7 +337,8 @@ fn main() -> ! {
                     while count < info.len {
                         if let Some(byte) = rxbuf.pop() {
                             // Write to lease
-                            if caller.borrow(0).write_at(count, byte).is_none() {
+                            if caller.borrow(0).write_at(count, byte).is_none()
+                            {
                                 break;
                             }
                             count += 1;

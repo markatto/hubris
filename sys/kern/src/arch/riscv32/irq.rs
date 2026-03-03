@@ -93,7 +93,8 @@ impl PlicController {
     /// external interrupts in mie.
     pub fn init(&self) {
         // Set priority threshold to 0 (accept all interrupts)
-        let threshold_addr = self.base + Self::THRESHOLD_BASE
+        let threshold_addr = self.base
+            + Self::THRESHOLD_BASE
             + self.context * Self::THRESHOLD_STRIDE;
         unsafe {
             core::ptr::write_volatile(threshold_addr as *mut u32, 0);
@@ -110,8 +111,8 @@ impl PlicController {
     }
 
     fn enable_addr(&self, irq: u32) -> (usize, u32) {
-        let enable_base = self.base + Self::ENABLE_BASE
-            + self.context * Self::ENABLE_STRIDE;
+        let enable_base =
+            self.base + Self::ENABLE_BASE + self.context * Self::ENABLE_STRIDE;
         let reg_offset = (irq / 32) as usize * 4;
         let bit = 1u32 << (irq % 32);
         (enable_base + reg_offset, bit)
@@ -226,16 +227,13 @@ impl InterruptController for PlicController {
 // QEMU virt machine PLIC configuration
 #[cfg(feature = "plic")]
 pub static IRQ: PlicController = PlicController::new(
-    0x0C00_0000,  // PLIC base address for QEMU virt
-    0,            // Context 0 (M-mode, hart 0)
+    0x0C00_0000, // PLIC base address for QEMU virt
+    0,           // Context 0 (M-mode, hart 0)
 );
 
 // Default to PLIC if no specific controller is selected
 #[cfg(not(any(feature = "plic", feature = "xh3irq")))]
-pub static IRQ: PlicController = PlicController::new(
-    0x0C00_0000,
-    0,
-);
+pub static IRQ: PlicController = PlicController::new(0x0C00_0000, 0);
 
 // TODO: Add Xh3irq implementation for RP2350
 // #[cfg(feature = "xh3irq")]
