@@ -1667,7 +1667,8 @@ fn build_kernel(
                 .create(false)
                 .append(true)
                 .open("target/memory.x")?;
-            let extra_content = std::fs::read_to_string(cfg.arch.kernel_link_script())?;
+            let extra_content =
+                std::fs::read_to_string(cfg.arch.kernel_link_script())?;
             write!(linkscr, "\n{}", extra_content)?;
         }
     }
